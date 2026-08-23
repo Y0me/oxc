@@ -91,6 +91,15 @@ export function createLspConnection(env: Record<string, string> = {}) {
       });
     },
 
+    getShowMessage(): Promise<{ type: number; message: string }> {
+      return new Promise((resolve) => {
+        const disposer = connection.onNotification("window/showMessage", (params) => {
+          resolve(params);
+          disposer.dispose();
+        });
+      });
+    },
+
     async [Symbol.asyncDispose]() {
       await connection.sendRequest(ShutdownRequest.type);
       await connection.sendNotification(ExitNotification.type);
@@ -309,6 +318,19 @@ function uriSnapshotHeader(fileUri: string, fixtureDir: string): string {
   return `
   --- URI -----------
 ${safeUri}`;
+}
+
+export function snapshotShowMessages(messages: { type: number; message: string }[]): string {
+  if (messages.length === 0) {
+    return "--- Show Messages ---------\n(none)";
+  }
+
+  return [
+    "--- Show Messages ---------",
+    ...messages.map(
+      ({ type, message }, index) => `[${index}] type=${type}\n${sanitizeMessage(message)}`,
+    ),
+  ].join("\n");
 }
 
 function sanitizeMessage(message: string): string {
