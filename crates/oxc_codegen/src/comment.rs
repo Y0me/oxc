@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
 use oxc_ast::{
@@ -17,7 +17,8 @@ type CommentList = SmallVec<[Comment; 1]>;
 #[derive(Default)]
 pub struct CommentStore {
     groups: Vec<CommentGroup>,
-    indices: FxHashMap<u32, usize>,
+    anchor_bits: Box<[u64]>,
+    orphan_indices: Box<[usize]>,
     remaining: usize,
 }
 
@@ -28,14 +29,23 @@ struct CommentGroup {
 }
 
 impl CommentStore {
+    const ANCHOR_FILTER_BITS: usize = 1 << 15;
+    const ANCHOR_FILTER_MASK: usize = Self::ANCHOR_FILTER_BITS - 1;
+
     fn build(comments: &mut Vec<Comment>) -> Self {
         let remaining = comments.len();
         comments.sort_unstable_by_key(|comment| (comment.attached_to, comment.span.start));
         let mut groups = Vec::<CommentGroup>::new();
-        let mut indices = FxHashMap::default();
+        let mut anchor_bits = if remaining == 0 {
+            Box::default()
+        } else {
+            vec![0_u64; Self::ANCHOR_FILTER_BITS / 64].into_boxed_slice()
+        };
         for comment in comments.drain(..) {
             if groups.last().is_none_or(|group| group.anchor != comment.attached_to) {
-                indices.insert(comment.attached_to, groups.len());
+                for bit in Self::anchor_filter_bits(comment.attached_to) {
+                    anchor_bits[bit / 64] |= 1_u64 << (bit % 64);
+                }
                 groups.push(CommentGroup {
                     anchor: comment.attached_to,
                     leading: CommentList::new(),
@@ -49,17 +59,46 @@ impl CommentStore {
                 group.trailing.push(comment);
             }
         }
-        Self { groups, indices, remaining }
+        let orphan_indices = groups
+            .iter()
+            .enumerate()
+            .filter_map(|(index, group)| {
+                group
+                    .leading
+                    .iter()
+                    .chain(&group.trailing)
+                    .any(|comment| preserve_when_orphaned(*comment))
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self { groups, anchor_bits, orphan_indices, remaining }
     }
 
-    #[inline]
-    fn is_empty(&self) -> bool {
-        self.remaining == 0
+    #[inline(always)]
+    fn may_have_anchor(&self, anchor: u32) -> bool {
+        if self.remaining == 0 {
+            return false;
+        }
+        Self::anchor_filter_bits(anchor)
+            .into_iter()
+            .all(|bit| self.anchor_bits[bit / 64] & (1_u64 << (bit % 64)) != 0)
     }
 
     #[inline]
     fn index(&self, anchor: u32) -> Option<usize> {
-        self.indices.get(&anchor).copied()
+        if !self.may_have_anchor(anchor) {
+            return None;
+        }
+        self.groups.binary_search_by_key(&anchor, |group| group.anchor).ok()
+    }
+
+    #[inline]
+    fn anchor_filter_bits(anchor: u32) -> [usize; 2] {
+        let first = anchor as usize & Self::ANCHOR_FILTER_MASK;
+        let mixed = anchor.wrapping_mul(0x9E37_79B1);
+        let second = (mixed ^ (mixed >> 16)) as usize & Self::ANCHOR_FILTER_MASK;
+        [first, second]
     }
 
     fn has_non_semantic_at(&self, anchor: u32) -> bool {
@@ -195,23 +234,30 @@ impl CommentStore {
         comments
     }
 
-    fn has_matching_before(&self, end: u32, predicate: impl Fn(&Comment) -> bool) -> bool {
-        let last = self.groups.partition_point(|group| group.anchor < end);
-        self.groups[..last]
-            .iter()
-            .any(|group| group.leading.iter().chain(&group.trailing).any(&predicate))
+    fn has_orphan_before(&self, end: u32) -> bool {
+        let last = self.orphan_indices.partition_point(|&index| self.groups[index].anchor < end);
+        self.orphan_indices[..last].iter().any(|&index| {
+            let group = &self.groups[index];
+            group
+                .leading
+                .iter()
+                .chain(&group.trailing)
+                .any(|comment| preserve_when_orphaned(*comment))
+        })
     }
 
-    fn take_matching_before(
-        &mut self,
-        end: u32,
-        predicate: impl Fn(&Comment) -> bool + Copy,
-    ) -> CommentList {
-        let last = self.groups.partition_point(|group| group.anchor < end);
+    fn take_orphans_before(&mut self, end: u32) -> CommentList {
+        let last = self.orphan_indices.partition_point(|&index| self.groups[index].anchor < end);
         let mut comments = CommentList::new();
-        for group in &mut self.groups[..last] {
-            comments.extend(take_matching(&mut group.leading, predicate));
-            comments.extend(take_matching(&mut group.trailing, predicate));
+        for orphan_index in 0..last {
+            let group_index = self.orphan_indices[orphan_index];
+            let group = &mut self.groups[group_index];
+            comments.extend(take_matching(&mut group.leading, |comment| {
+                preserve_when_orphaned(*comment)
+            }));
+            comments.extend(take_matching(&mut group.trailing, |comment| {
+                preserve_when_orphaned(*comment)
+            }));
         }
         comments.sort_unstable_by_key(|comment| comment.span.start);
         self.remaining -= comments.len();
@@ -428,11 +474,17 @@ impl Codegen<'_> {
         })
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn print_attached_comments_at(&mut self, start: u32) {
-        if self.comments.is_empty() {
+        if !self.comments.may_have_anchor(start) {
             return;
         }
+        self.print_attached_comments_at_slow(start);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn print_attached_comments_at_slow(&mut self, start: u32) {
         if self.has_attached_comments_at(start) {
             let comments = self.comments.take_matching_leading_at(start, |comment| {
                 (!self.suppress_normal_comments && comment.is_normal())
@@ -450,11 +502,17 @@ impl Codegen<'_> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn print_trailing_attached_comments_at(&mut self, end: u32) {
-        if self.comments.is_empty() {
+        if !self.comments.may_have_anchor(end) {
             return;
         }
+        self.print_trailing_attached_comments_at_slow(end);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn print_trailing_attached_comments_at_slow(&mut self, end: u32) {
         let source_text = self.source_text;
         let should_print = self.comments.trailing_at(end).is_some_and(|comments| {
             comments.iter().any(|comment| {
@@ -607,7 +665,7 @@ impl Codegen<'_> {
     /// Used by block emitters to keep an empty body multi-line.
     #[inline]
     pub(crate) fn has_orphan_comments_before(&self, end: u32) -> bool {
-        self.comments.has_matching_before(end, |comment| preserve_when_orphaned(*comment))
+        self.comments.has_orphan_before(end)
     }
 
     /// Drain pending orphan comments with `attached_to < end` and emit them in
@@ -616,8 +674,7 @@ impl Codegen<'_> {
     /// upstream pass.
     #[inline]
     pub(crate) fn print_orphan_comments_before(&mut self, end: u32) {
-        let mut orphans =
-            self.comments.take_matching_before(end, |comment| preserve_when_orphaned(*comment));
+        let mut orphans = self.comments.take_orphans_before(end);
         if let Some(last) = orphans.last_mut() {
             // Orphans aren't in their original position, so the source's
             // `followed_by_newline` hint no longer applies. Force it on so
@@ -681,9 +738,7 @@ impl Codegen<'_> {
     }
 
     pub(crate) fn print_all_remaining_orphan_comments(&mut self) {
-        let mut comments = self
-            .comments
-            .take_matching_before(u32::MAX, |comment| preserve_when_orphaned(*comment));
+        let mut comments = self.comments.take_orphans_before(u32::MAX);
         if comments.is_empty() {
             return;
         }
