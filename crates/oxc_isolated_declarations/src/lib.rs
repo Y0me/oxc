@@ -102,7 +102,15 @@ impl<'a> IsolatedDeclarations<'a> {
             source_type,
             program.source_text,
             ArenaVec::from_iter_in(
-                program.comments.iter().filter(|c| c.is_jsdoc()).copied(),
+                program
+                    .comments
+                    .iter()
+                    .filter(|comment| {
+                        comment.is_jsdoc()
+                            && !(self.strip_internal
+                                && self.internal_annotations.contains(&comment.attached_to))
+                    })
+                    .copied(),
                 &self,
             ),
             None,
