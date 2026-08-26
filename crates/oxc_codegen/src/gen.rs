@@ -13,7 +13,7 @@ use crate::{
     Codegen, Context, Operator, Quote,
     binary_expr_visitor::{BinaryExpressionVisitor, Binaryish, BinaryishOperator},
     cjs_module_lexer,
-    comment::AnnotationKind,
+    comment::{AnnotationKind, is_pife_function},
 };
 
 /// Generate source code for an AST node.
@@ -38,7 +38,9 @@ pub trait GenExpr: GetSpan {
     /// Generate code for an expression, respecting operator precedence. Alias for `gen_expr`.
     #[inline]
     fn print_expr(&self, p: &mut Codegen, precedence: Precedence, ctx: Context) {
+        p.print_attached_comments_at(self.span().start);
         self.gen_expr(p, precedence, ctx);
+        p.print_trailing_attached_comments_at(self.span().end);
         // Map chain punctuation after a postfix operand ending in `)`/`]`.
         p.add_source_mapping_after_postfix(self.span(), precedence);
     }
@@ -786,18 +788,18 @@ impl Gen for Function<'_> {
                 p.print_str("async ");
             }
             p.print_str("function");
-            if self.generator {
-                let next_node_start =
-                    self.id.as_ref().map_or(self.params.span.start, |id| id.span.start);
-                if p.has_comments_in_range(self.span.start, next_node_start) {
-                    p.print_soft_space();
-                    p.print_comments_in_range(self.span.start, next_node_start);
-                    if p.last_byte() == Some(b'\n') {
-                        p.print_indent();
-                    } else {
-                        p.consume_pending_indent_space();
-                    }
+            let next_node_start =
+                self.id.as_ref().map_or(self.params.span.start, |id| id.span.start);
+            if p.has_comments_in_range(self.span.start, next_node_start) {
+                p.print_soft_space();
+                p.print_comments_in_range(self.span.start, next_node_start);
+                if p.last_byte() == Some(b'\n') {
+                    p.print_indent();
+                } else {
+                    p.consume_pending_indent_space();
                 }
+            }
+            if self.generator {
                 p.print_ascii_byte(b'*');
                 p.print_soft_space();
             }
@@ -1316,6 +1318,12 @@ impl Gen for ExportDefaultDeclarationKind<'_> {
 }
 
 impl GenExpr for Expression<'_> {
+    #[inline]
+    fn print_expr(&self, p: &mut Codegen, precedence: Precedence, ctx: Context) {
+        self.gen_expr(p, precedence, ctx);
+        p.add_source_mapping_after_postfix(self.span(), precedence);
+    }
+
     fn gen_expr(&self, p: &mut Codegen, precedence: Precedence, ctx: Context) {
         p.print_attached_comments_before_expression(self);
         match self {
@@ -1333,7 +1341,7 @@ impl GenExpr for Expression<'_> {
             Self::BinaryExpression(expr) => expr.print_expr(p, precedence, ctx),
             Self::LogicalExpression(expr) => expr.print_expr(p, precedence, ctx),
             // Object and array literals (common)
-            Self::ObjectExpression(expr) => expr.print_expr(p, precedence, ctx),
+            Self::ObjectExpression(expr) => expr.gen_expr(p, precedence, ctx),
             Self::ArrayExpression(expr) => expr.print(p, ctx),
             // Assignment and update (common)
             Self::AssignmentExpression(expr) => expr.print_expr(p, precedence, ctx),
@@ -1351,7 +1359,11 @@ impl GenExpr for Expression<'_> {
                         false,
                     );
                 }
-                func.print_expr(p, precedence, ctx);
+                if func.pife {
+                    func.gen_expr(p, precedence, ctx);
+                } else {
+                    func.print_expr(p, precedence, ctx);
+                }
             }
             Self::FunctionExpression(func) => {
                 if func.pure && p.options.print_annotation_comment() {
@@ -1394,7 +1406,13 @@ impl GenExpr for Expression<'_> {
             Self::PrivateFieldExpression(expr) => expr.print_expr(p, precedence, ctx),
             Self::PrivateInExpression(expr) => expr.print_expr(p, precedence, ctx),
             // Parenthesized
-            Self::ParenthesizedExpression(e) => e.print_expr(p, precedence, ctx),
+            Self::ParenthesizedExpression(e) => {
+                if is_pife_function(self) {
+                    e.gen_expr(p, precedence, ctx);
+                } else {
+                    e.print_expr(p, precedence, ctx);
+                }
+            }
             // JSX (less common in typical JS code)
             Self::JSXElement(el) => el.print(p, ctx),
             Self::JSXFragment(fragment) => fragment.print(p, ctx),
@@ -1413,7 +1431,11 @@ impl GenExpr for Expression<'_> {
 
 impl GenExpr for ParenthesizedExpression<'_> {
     fn gen_expr(&self, p: &mut Codegen, precedence: Precedence, ctx: Context) {
-        self.expression.print_expr(p, precedence, ctx);
+        if is_pife_function(&self.expression) {
+            self.expression.gen_expr(p, precedence, ctx);
+        } else {
+            self.expression.print_expr(p, precedence, ctx);
+        }
     }
 }
 
@@ -2085,12 +2107,18 @@ impl GenExpr for ConditionalExpression<'_> {
             // Annotation-gated (see the helper's doc): `if/else` bodies get
             // merged into consequents on mutated ASTs.
             p.print_annotation_comments_before_expression(&self.consequent);
-            self.consequent.print_expr(p, Precedence::Yield, Context::empty());
+            p.with_suppressed_normal_comments(|p| {
+                self.consequent.print_expr(p, Precedence::Yield, Context::empty());
+            });
             p.print_soft_space();
             p.print_colon();
             p.print_soft_space();
             p.print_leading_comments_before_expression(&self.alternate);
-            self.alternate.print_expr(p, Precedence::Yield, ctx & Context::FORBID_IN);
+            if is_pife_function(&self.alternate) {
+                self.alternate.gen_expr(p, Precedence::Yield, ctx & Context::FORBID_IN);
+            } else {
+                self.alternate.print_expr(p, Precedence::Yield, ctx & Context::FORBID_IN);
+            }
         });
     }
 }

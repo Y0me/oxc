@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
 use oxc_ast::{
@@ -14,25 +14,262 @@ use crate::{Codegen, LegalComment, options::CommentOptions};
 
 type CommentList = SmallVec<[Comment; 1]>;
 
-pub type CommentsMap = FxHashMap</* attached_to */ u32, CommentList>;
+#[derive(Default)]
+pub struct CommentStore {
+    groups: Vec<CommentGroup>,
+}
+
+struct CommentGroup {
+    anchor: u32,
+    leading: CommentList,
+    trailing: CommentList,
+}
+
+impl CommentStore {
+    fn build(comments: &mut Vec<Comment>) -> Self {
+        comments.sort_unstable_by_key(|comment| (comment.attached_to, comment.span.start));
+        let mut groups = Vec::<CommentGroup>::new();
+        for comment in comments.drain(..) {
+            if groups.last().is_none_or(|group| group.anchor != comment.attached_to) {
+                groups.push(CommentGroup {
+                    anchor: comment.attached_to,
+                    leading: CommentList::new(),
+                    trailing: CommentList::new(),
+                });
+            }
+            let group = groups.last_mut().unwrap();
+            if comment.is_leading() {
+                group.leading.push(comment);
+            } else {
+                group.trailing.push(comment);
+            }
+        }
+        Self { groups }
+    }
+
+    #[inline]
+    fn index(&self, anchor: u32) -> Result<usize, usize> {
+        self.groups.binary_search_by_key(&anchor, |group| group.anchor)
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.groups.iter().all(|group| group.leading.is_empty() && group.trailing.is_empty())
+    }
+
+    #[inline]
+    fn has_at(&self, anchor: u32) -> bool {
+        self.index(anchor).is_ok_and(|index| {
+            let group = &self.groups[index];
+            !group.leading.is_empty() || !group.trailing.is_empty()
+        })
+    }
+
+    #[inline]
+    fn leading_at(&self, anchor: u32) -> Option<&CommentList> {
+        let group = self.index(anchor).ok().map(|index| &self.groups[index])?;
+        (!group.leading.is_empty()).then_some(&group.leading)
+    }
+
+    #[inline]
+    fn trailing_at(&self, anchor: u32) -> Option<&CommentList> {
+        let group = self.index(anchor).ok().map(|index| &self.groups[index])?;
+        (!group.trailing.is_empty()).then_some(&group.trailing)
+    }
+
+    fn take_leading_at(&mut self, anchor: u32) -> Option<CommentList> {
+        let index = self.index(anchor).ok()?;
+        (!self.groups[index].leading.is_empty())
+            .then(|| std::mem::take(&mut self.groups[index].leading))
+    }
+
+    fn take_trailing_at(&mut self, anchor: u32) -> Option<CommentList> {
+        let index = self.index(anchor).ok()?;
+        (!self.groups[index].trailing.is_empty())
+            .then(|| std::mem::take(&mut self.groups[index].trailing))
+    }
+
+    fn take_all_at(&mut self, anchor: u32) -> Option<CommentList> {
+        let index = self.index(anchor).ok()?;
+        let group = &mut self.groups[index];
+        let mut comments = std::mem::take(&mut group.leading);
+        comments.extend(std::mem::take(&mut group.trailing));
+        if comments.is_empty() {
+            None
+        } else {
+            comments.sort_unstable_by_key(|comment| comment.span.start);
+            Some(comments)
+        }
+    }
+
+    fn take_matching_at(
+        &mut self,
+        anchor: u32,
+        predicate: impl Fn(&Comment) -> bool + Copy,
+    ) -> CommentList {
+        let Ok(index) = self.index(anchor) else { return CommentList::new() };
+        let group = &mut self.groups[index];
+        let mut comments = take_matching(&mut group.leading, predicate);
+        comments.extend(take_matching(&mut group.trailing, predicate));
+        comments.sort_unstable_by_key(|comment| comment.span.start);
+        comments
+    }
+
+    fn take_matching_leading_at(
+        &mut self,
+        anchor: u32,
+        predicate: impl Fn(&Comment) -> bool,
+    ) -> CommentList {
+        let Ok(index) = self.index(anchor) else { return CommentList::new() };
+        take_matching(&mut self.groups[index].leading, predicate)
+    }
+
+    fn take_matching_trailing_at(
+        &mut self,
+        anchor: u32,
+        predicate: impl Fn(&Comment) -> bool,
+    ) -> CommentList {
+        let Ok(index) = self.index(anchor) else { return CommentList::new() };
+        take_matching(&mut self.groups[index].trailing, predicate)
+    }
+
+    #[inline]
+    fn bounds(&self, start: u32, end: u32, inclusive: bool) -> (usize, usize) {
+        let first = self.groups.partition_point(|group| group.anchor < start);
+        let last = if inclusive {
+            self.groups.partition_point(|group| group.anchor <= end)
+        } else {
+            self.groups.partition_point(|group| group.anchor < end)
+        };
+        (first, last)
+    }
+
+    fn has_between(&self, start: u32, end: u32) -> bool {
+        if start >= end {
+            return false;
+        }
+        let (first, last) = self.bounds(start.saturating_add(1), end, false);
+        self.groups[first..last]
+            .iter()
+            .any(|group| !group.leading.is_empty() || !group.trailing.is_empty())
+    }
+
+    fn take_between(
+        &mut self,
+        start: u32,
+        end: u32,
+        predicate: impl Fn(&Comment) -> bool + Copy,
+    ) -> CommentList {
+        if start >= end {
+            return CommentList::new();
+        }
+        let (first, last) = self.bounds(start.saturating_add(1), end, false);
+        let mut comments = CommentList::new();
+        for group in &mut self.groups[first..last] {
+            comments.extend(take_matching(&mut group.leading, predicate));
+            comments.extend(take_matching(&mut group.trailing, predicate));
+        }
+        comments.sort_unstable_by_key(|comment| comment.span.start);
+        comments
+    }
+
+    fn take_remaining_in(&mut self, start: u32, end: u32) -> CommentList {
+        if start > end {
+            return CommentList::new();
+        }
+        let (first, last) = self.bounds(start, end, true);
+        take_groups(&mut self.groups[first..last])
+    }
+
+    fn has_remaining_in(&self, start: u32, end: u32) -> bool {
+        if start > end {
+            return false;
+        }
+        let (first, last) = self.bounds(start, end, true);
+        self.groups[first..last]
+            .iter()
+            .any(|group| !group.leading.is_empty() || !group.trailing.is_empty())
+    }
+
+    fn take_all_remaining(&mut self) -> CommentList {
+        take_groups(&mut self.groups)
+    }
+
+    fn has_matching_before(&self, end: u32, predicate: impl Fn(&Comment) -> bool) -> bool {
+        let last = self.groups.partition_point(|group| group.anchor < end);
+        self.groups[..last].iter().any(|group| {
+            group.leading.iter().chain(&group.trailing).any(&predicate)
+        })
+    }
+
+    fn take_matching_before(
+        &mut self,
+        end: u32,
+        predicate: impl Fn(&Comment) -> bool + Copy,
+    ) -> CommentList {
+        let last = self.groups.partition_point(|group| group.anchor < end);
+        let mut comments = CommentList::new();
+        for group in &mut self.groups[..last] {
+            comments.extend(take_matching(&mut group.leading, predicate));
+            comments.extend(take_matching(&mut group.trailing, predicate));
+        }
+        comments.sort_unstable_by_key(|comment| comment.span.start);
+        comments
+    }
+}
+
+fn take_matching(
+    comments: &mut CommentList,
+    predicate: impl Fn(&Comment) -> bool,
+) -> CommentList {
+    let mut taken = CommentList::new();
+    comments.retain(|comment| {
+        if predicate(comment) {
+            taken.push(*comment);
+            false
+        } else {
+            true
+        }
+    });
+    taken
+}
+
+fn take_groups(groups: &mut [CommentGroup]) -> CommentList {
+    let mut comments = CommentList::new();
+    for group in groups {
+        comments.extend(std::mem::take(&mut group.leading));
+        comments.extend(std::mem::take(&mut group.trailing));
+    }
+    comments.sort_unstable_by_key(|comment| comment.span.start);
+    comments
+}
 
 /// Whether a comment remains meaningful if its original AST anchor is removed.
 fn preserve_when_orphaned(comment: Comment) -> bool {
     comment.is_legal() || comment.is_coverage_ignore_file()
 }
 
+fn is_html_comment(comment: Comment, source_text: Option<&str>) -> bool {
+    comment.is_line()
+        && source_text.is_some_and(|source_text| {
+            let value = comment.span.source_text(source_text);
+            value.starts_with("<!--") || value.starts_with("-->")
+        })
+}
+
 /// A `pife`-marked arrow or function expression prints its leading comments
 /// inside its own `(` wrap, so operand emission sites must not consume them.
-fn is_pife_function(expression: &Expression<'_>) -> bool {
+pub(crate) fn is_pife_function(expression: &Expression<'_>) -> bool {
     match expression {
         Expression::ArrowFunctionExpression(arrow) => arrow.pife,
         Expression::FunctionExpression(function) => function.pife,
+        Expression::ParenthesizedExpression(paren) => is_pife_function(&paren.expression),
         _ => false,
     }
 }
 
 /// Which annotation kind an emission site expects to recover from
-/// [`Codegen::annotation_comments`].
+/// [`Codegen::comments`].
 ///
 /// `@__PURE__` / `#__PURE__` on a `CallExpression` or `NewExpression`, and
 /// `@__NO_SIDE_EFFECTS__` / `#__NO_SIDE_EFFECTS__` on a function declaration or
@@ -75,16 +312,11 @@ impl Codegen<'_> {
         if self.options.comments == CommentOptions::disabled() {
             return;
         }
-        // Each retained comment can create at most one map entry. Reserving
-        // this upper bound avoids incremental map growth while preprocessing.
-        self.comments.reserve(comments.len());
+        let mut retained = Vec::with_capacity(comments.len());
         for comment in comments {
-            // Stash pure / no-side-effects comments by `attached_to` so the
-            // emission site can recover the verbatim source text instead of
-            // falling back to the canonical literal (rolldown#9408).
             if comment.is_pure() || comment.is_no_side_effects() {
                 if comment.is_leading() && self.options.print_annotation_comment() {
-                    self.annotation_comments.entry(comment.attached_to).or_default().push(*comment);
+                    retained.push(*comment);
                 }
                 continue;
             }
@@ -96,18 +328,14 @@ impl Codegen<'_> {
 
             if add {
                 self.has_property_key_annotations |= comment.is_property_key_annotation();
-                if preserve_when_orphaned(*comment)
-                    && let Err(idx) = self.orphan_comment_keys.binary_search(&comment.attached_to)
-                {
-                    self.orphan_comment_keys.insert(idx, comment.attached_to);
-                }
-                self.comments.entry(comment.attached_to).or_default().push(*comment);
+                retained.push(*comment);
             }
         }
+        self.comments = CommentStore::build(&mut retained);
     }
 
     pub(crate) fn has_comment(&self, start: u32) -> bool {
-        self.comments.contains_key(&start)
+        self.comments.has_at(start)
     }
 
     /// Emit a pure / no-side-effects annotation comment for the AST node at
@@ -134,13 +362,13 @@ impl Codegen<'_> {
         kind: AnnotationKind,
         newline_after: bool,
     ) {
-        let has_compatible_annotation =
-            self.annotation_comments.get(&start).is_some_and(|comments| {
-                comments.iter().any(|comment| kind.matches(comment))
-                    && (newline_after || comments.iter().all(|comment| !comment.is_line()))
-            });
+        let has_compatible_annotation = self.comments.leading_at(start).is_some_and(|comments| {
+            comments.iter().any(|comment| kind.matches(comment))
+                && (newline_after
+                    || comments.iter().filter(|comment| kind.matches(comment)).all(|comment| !comment.is_line()))
+        });
         if self.source_text.is_some() && has_compatible_annotation {
-            let comments = self.annotation_comments.remove(&start).unwrap();
+            let comments = self.comments.take_matching_leading_at(start, |comment| kind.matches(comment));
             for (index, comment) in comments.iter().enumerate() {
                 if index != 0 {
                     self.print_str(" ");
@@ -158,7 +386,7 @@ impl Codegen<'_> {
     }
 
     pub(crate) fn print_leading_comments(&mut self, start: u32) {
-        if let Some(comments) = self.get_comments(start) {
+        if let Some(comments) = self.comments.take_leading_at(start) {
             self.print_comments(&comments);
         }
     }
@@ -167,7 +395,10 @@ impl Codegen<'_> {
         if self.comments.is_empty() {
             return None;
         }
-        self.comments.remove(&start)
+        let comments = self
+            .comments
+            .take_matching_at(start, |comment| !comment.is_pure() && !comment.is_no_side_effects());
+        (!comments.is_empty()).then_some(comments)
     }
 
     #[inline]
@@ -183,11 +414,14 @@ impl Codegen<'_> {
     /// behavior. Invalid pure annotations and property-key annotations also
     /// have dedicated emission sites.
     fn has_attached_comments_at(&self, start: u32) -> bool {
-        self.comments.get(&start).is_some_and(|comments| {
+        self.comments.leading_at(start).is_some_and(|comments| {
             comments.iter().any(|comment| {
-                comment.is_jsdoc()
+                (!self.suppress_normal_comments && comment.is_normal())
+                    || comment.is_jsdoc()
                     || (comment.is_annotation()
                         && comment.content != CommentContent::PureNotApplied
+                        && !comment.is_pure()
+                        && !comment.is_no_side_effects()
                         && !comment.is_property_key_annotation())
             })
         })
@@ -195,7 +429,16 @@ impl Codegen<'_> {
 
     pub(crate) fn print_attached_comments_at(&mut self, start: u32) {
         if self.has_attached_comments_at(start) {
-            self.print_comments_at(start);
+            let comments = self.comments.take_matching_leading_at(start, |comment| {
+                (!self.suppress_normal_comments && comment.is_normal())
+                    || comment.is_jsdoc()
+                    || (comment.is_annotation()
+                        && comment.content != CommentContent::PureNotApplied
+                        && !comment.is_pure()
+                        && !comment.is_no_side_effects()
+                        && !comment.is_property_key_annotation())
+            });
+            self.print_comments(&comments);
             if self.last_byte() != Some(b'\n') {
                 self.consume_pending_indent_space();
             }
@@ -205,10 +448,11 @@ impl Codegen<'_> {
     pub(crate) fn print_normal_comments_at(&mut self, start: u32) {
         let should_print = self
             .comments
-            .get(&start)
+            .leading_at(start)
             .is_some_and(|comments| comments.iter().any(|comment| comment.is_normal()));
         if should_print {
-            self.print_comments_at(start);
+            let comments = self.comments.take_matching_leading_at(start, |comment| comment.is_normal());
+            self.print_comments(&comments);
             if self.last_byte() != Some(b'\n') {
                 self.consume_pending_indent_space();
             }
@@ -216,27 +460,43 @@ impl Codegen<'_> {
     }
 
     pub(crate) fn print_trailing_normal_comments_at(&mut self, end: u32) {
-        let should_print = self.comments.get(&end).is_some_and(|comments| {
-            comments.iter().any(|comment| comment.is_trailing() && comment.is_normal())
-        });
+        let should_print = self
+            .comments
+            .trailing_at(end)
+            .is_some_and(|comments| comments.iter().any(|comment| comment.is_normal()));
         if should_print {
             self.print_soft_space();
-            self.print_comments_at(end);
+            let comments =
+                self.comments.take_matching_trailing_at(end, |comment| comment.is_normal());
+            self.print_comments(&comments);
             self.clear_pending_indent_space();
         }
     }
 
     pub(crate) fn print_trailing_attached_comments_at(&mut self, end: u32) {
-        let should_print = self.comments.get(&end).is_some_and(|comments| {
+        let source_text = self.source_text;
+        let should_print = self.comments.trailing_at(end).is_some_and(|comments| {
             comments.iter().any(|comment| {
-                comment.is_trailing()
-                    && (comment.is_jsdoc()
+                !is_html_comment(*comment, source_text)
+                    && (comment.is_normal()
+                        || comment.is_jsdoc()
                         || (comment.is_annotation() && !comment.is_property_key_annotation()))
             })
         });
         if should_print {
             self.print_soft_space();
-            self.print_comments_at(end);
+            let has_html = self
+                .comments
+                .trailing_at(end)
+                .is_some_and(|comments| comments.iter().any(|comment| is_html_comment(*comment, source_text)));
+            let comments = if has_html {
+                self.comments.take_matching_trailing_at(end, |comment| {
+                    !is_html_comment(*comment, source_text)
+                })
+            } else {
+                self.comments.take_trailing_at(end).unwrap()
+            };
+            self.print_comments(&comments);
             self.clear_pending_indent_space();
         }
     }
@@ -245,7 +505,10 @@ impl Codegen<'_> {
         &mut self,
         expression: &Expression<'_>,
     ) {
-        if self.comments.is_empty() || is_pife_function(expression) {
+        if self.comments.is_empty()
+            || is_pife_function(expression)
+            || matches!(expression, Expression::ObjectExpression(_))
+        {
             return;
         }
         let start = expression.span().start;
@@ -265,7 +528,7 @@ impl Codegen<'_> {
     /// pending indent-as-space so the token glues with a single space.
     #[inline]
     pub(crate) fn print_leading_comments_anchored_to_self(&mut self, start: u32) {
-        if let Some(comments) = self.get_comments(start) {
+        if let Some(comments) = self.comments.take_leading_at(start) {
             self.print_comments(&comments);
             if self.last_byte() == Some(b'\n') {
                 self.print_indent();
@@ -281,7 +544,7 @@ impl Codegen<'_> {
         if !self.has_property_key_annotations {
             return;
         }
-        if self.comments.get(&start).is_some_and(|comments| {
+        if self.comments.leading_at(start).is_some_and(|comments| {
             comments.iter().any(|comment| comment.is_property_key_annotation())
         }) {
             self.print_leading_comments_anchored_to_self(start);
@@ -325,12 +588,27 @@ impl Codegen<'_> {
             return;
         }
         let start = expression.span().start;
-        if self
-            .comments
-            .get(&start)
-            .is_some_and(|comments| comments.iter().any(|comment| comment.is_annotation()))
-        {
-            self.print_leading_comments_anchored_to_self(start);
+        let has_annotation = self.comments.leading_at(start).is_some_and(|comments| {
+            comments.iter().any(|comment| {
+                comment.is_annotation()
+                    && !comment.is_pure()
+                    && !comment.is_no_side_effects()
+                    && !comment.is_property_key_annotation()
+            })
+        });
+        if has_annotation {
+            let comments = self.comments.take_matching_leading_at(start, |comment| {
+                comment.is_annotation()
+                    && !comment.is_pure()
+                    && !comment.is_no_side_effects()
+                    && !comment.is_property_key_annotation()
+            });
+            self.print_comments(&comments);
+            if self.last_byte() == Some(b'\n') {
+                self.print_indent();
+            } else {
+                self.consume_pending_indent_space();
+            }
         }
         if let Expression::ParenthesizedExpression(paren) = expression {
             self.print_annotation_comments_before_expression(&paren.expression);
@@ -341,10 +619,7 @@ impl Codegen<'_> {
     /// Used by block emitters to keep an empty body multi-line.
     #[inline]
     pub(crate) fn has_orphan_comments_before(&self, end: u32) -> bool {
-        self.orphan_comment_keys
-            .iter()
-            .take_while(|&&k| k < end)
-            .any(|k| self.comments.contains_key(k))
+        self.comments.has_matching_before(end, |comment| preserve_when_orphaned(*comment))
     }
 
     /// Drain pending orphan comments with `attached_to < end` and emit them in
@@ -353,33 +628,9 @@ impl Codegen<'_> {
     /// upstream pass.
     #[inline]
     pub(crate) fn print_orphan_comments_before(&mut self, end: u32) {
-        if self.orphan_comment_keys.is_empty() {
-            return;
-        }
-        let idx = self.orphan_comment_keys.partition_point(|&k| k < end);
-        if idx == 0 {
-            return;
-        }
-        // Concatenate across keys so `print_comments` sees one sequence;
-        // per-key calls would leak `print_next_indent_as_space` and produce
-        // stray leading spaces.
-        let mut orphans: Vec<Comment> = Vec::new();
-        let comments = &mut self.comments;
-        for k in self.orphan_comment_keys.drain(..idx) {
-            let Some(entry) = comments.get_mut(&k) else { continue };
-            debug_assert!(entry.iter().any(|c| preserve_when_orphaned(*c)));
-            entry.retain(|comment| {
-                if preserve_when_orphaned(*comment) {
-                    orphans.push(*comment);
-                    false
-                } else {
-                    true
-                }
-            });
-            if entry.is_empty() {
-                comments.remove(&k);
-            }
-        }
+        let mut orphans = self
+            .comments
+            .take_matching_before(end, |comment| preserve_when_orphaned(*comment));
         if let Some(last) = orphans.last_mut() {
             // Orphans aren't in their original position, so the source's
             // `followed_by_newline` hint no longer applies. Force it on so
@@ -394,32 +645,53 @@ impl Codegen<'_> {
     /// Print comments attached to any position in the given range `(start, end)` (exclusive).
     /// Returns `true` if any comments were printed.
     pub(crate) fn print_comments_in_range(&mut self, start: u32, end: u32) -> bool {
-        if self.comments.is_empty() {
+        let comments = self.comments.take_between(start, end, |comment| {
+            !comment.is_pure() && !comment.is_no_side_effects()
+        });
+        if comments.is_empty() {
             return false;
-        }
-        let mut keys: SmallVec<[u32; 4]> =
-            self.comments.keys().filter(|&&key| key > start && key < end).copied().collect();
-        if keys.is_empty() {
-            return false;
-        }
-        keys.sort_unstable();
-        let mut comments = CommentList::new();
-        for key in keys {
-            comments.extend(self.comments.remove(&key).unwrap());
         }
         self.print_comments(&comments);
         true
     }
 
     pub(crate) fn has_comments_in_range(&self, start: u32, end: u32) -> bool {
-        self.comments.keys().any(|&key| key > start && key < end)
+        self.comments.has_between(start, end)
+    }
+
+    pub(crate) fn has_remaining_comments_in_span(&self, span: oxc_span::Span) -> bool {
+        self.comments.has_remaining_in(span.start, span.end)
+    }
+
+    pub(crate) fn print_remaining_comments_in_span(&mut self, span: oxc_span::Span) {
+        let mut comments = self.comments.take_remaining_in(span.start, span.end);
+        if comments.is_empty() {
+            return;
+        }
+        if comments.first().is_some_and(|comment| !comment.preceded_by_newline()) {
+            self.print_soft_space();
+        }
+        comments.last_mut().unwrap().set_followed_by_newline(true);
+        self.print_comments(&comments);
+    }
+
+    pub(crate) fn print_all_remaining_comments(&mut self) {
+        let mut comments = self.comments.take_all_remaining();
+        if comments.is_empty() {
+            return;
+        }
+        if comments.first().is_some_and(|comment| !comment.preceded_by_newline()) {
+            self.print_soft_space();
+        }
+        comments.last_mut().unwrap().set_followed_by_newline(true);
+        self.print_comments(&comments);
     }
 
     pub(crate) fn print_expr_comments(&mut self, start: u32) -> bool {
         if self.comments.is_empty() {
             return false;
         }
-        let Some(comments) = self.comments.remove(&start) else { return false };
+        let Some(comments) = self.comments.take_all_at(start) else { return false };
 
         for comment in &comments {
             self.print_hard_newline();

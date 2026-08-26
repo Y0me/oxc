@@ -34,7 +34,7 @@ mod sourcemap_builder;
 mod str;
 
 use binary_expr_visitor::BinaryExpressionVisitor;
-use comment::CommentsMap;
+use comment::CommentStore;
 use operator::Operator;
 #[cfg(feature = "sourcemap")]
 use sourcemap_builder::SourcemapBuilder;
@@ -126,19 +126,12 @@ pub struct Codegen<'a> {
     quote: Quote,
 
     // Builders
-    comments: CommentsMap,
+    comments: CommentStore,
     has_property_key_annotations: bool,
 
-    /// Pure / no-side-effects annotation comments keyed by `attached_to`,
-    /// so the emission site can recover verbatim source text instead of a
-    /// canonicalised literal (rolldown#9408). Keep all comments at an anchor
-    /// so repeated compiler hints are not silently discarded.
-    annotation_comments: FxHashMap<u32, smallvec::SmallVec<[Comment; 1]>>,
-
-    /// Sorted, deduped `attached_to` keys for comments that must survive a
-    /// removed anchor. Lets `print_orphan_comments_before` flush via
-    /// `partition_point` + `drain`.
-    orphan_comment_keys: Vec<u32>,
+    /// Suppress normal comments at a moved expression boundary. They remain
+    /// unclaimed for the enclosing statement's safe fallback.
+    suppress_normal_comments: bool,
 
     #[cfg(feature = "sourcemap")]
     sourcemap_builder: Option<SourcemapBuilder<'a>>,
@@ -191,10 +184,9 @@ impl<'a> Codegen<'a> {
             is_jsx: false,
             indent: 0,
             quote: Quote::Double,
-            comments: CommentsMap::default(),
+            comments: CommentStore::default(),
             has_property_key_annotations: false,
-            annotation_comments: FxHashMap::default(),
-            orphan_comment_keys: Vec::new(),
+            suppress_normal_comments: false,
             #[cfg(feature = "sourcemap")]
             sourcemap_builder: None,
         }
@@ -260,6 +252,7 @@ impl<'a> Codegen<'a> {
             self.sourcemap_builder = Some(SourcemapBuilder::new(path, program.source_text));
         }
         program.print(&mut self, Context::default());
+        self.print_all_remaining_comments();
         let legal_comments = self.handle_eof_linked_or_external_comments(program);
         let code = self.code.into_string();
         #[cfg(feature = "sourcemap")]
@@ -574,6 +567,14 @@ impl<'a> Codegen<'a> {
         self.print_next_indent_as_space = false;
     }
 
+    fn with_suppressed_normal_comments<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let previous = self.suppress_normal_comments;
+        self.suppress_normal_comments = true;
+        let result = f(self);
+        self.suppress_normal_comments = previous;
+        result
+    }
+
     #[inline]
     fn print_semicolon_after_statement(&mut self) {
         if self.options.minify {
@@ -677,6 +678,10 @@ impl<'a> Codegen<'a> {
             self.print_orphan_comments_before(stmt.span().start);
             self.print_semicolon_if_needed();
             stmt.print(self, ctx);
+            if self.has_remaining_comments_in_span(stmt.span()) {
+                self.print_semicolon_if_needed();
+                self.print_remaining_comments_in_span(stmt.span());
+            }
         }
         self.print_orphan_comments_before(scope_end);
     }
@@ -735,6 +740,11 @@ impl<'a> Codegen<'a> {
             self.print_semicolon_after_statement();
         } else {
             first.print(self, ctx);
+        }
+
+        if self.has_remaining_comments_in_span(first.span()) {
+            self.print_semicolon_if_needed();
+            self.print_remaining_comments_in_span(first.span());
         }
 
         self.print_stmts_with_orphan_flush(rest, scope_end, ctx);
