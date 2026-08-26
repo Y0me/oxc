@@ -612,6 +612,40 @@ impl Codegen<'_> {
         self.comments.has_between(start, end)
     }
 
+    pub(crate) fn print_comments_before_closing_delimiter(&mut self, close: u32) -> bool {
+        let Some(comments) = self.comments.take_leading_at(close) else { return false };
+        self.print_comments(&comments);
+        if self.last_byte() == Some(b'\n') {
+            self.print_indent();
+        } else {
+            self.consume_pending_indent_space();
+        }
+        true
+    }
+
+    pub(crate) fn print_comments_in_range_anchored_to_next(
+        &mut self,
+        start: u32,
+        end: u32,
+    ) -> bool {
+        if !self.print_comments_in_range(start, end) {
+            return false;
+        }
+        if self.last_byte() == Some(b'\n') {
+            self.print_indent();
+        } else {
+            self.consume_pending_indent_space();
+        }
+        true
+    }
+
+    pub(crate) fn print_expr_comments_in_range(&mut self, start: u32, end: u32) -> bool {
+        let comments = self.comments.take_between(start, end, |comment| {
+            !comment.is_pure() && !comment.is_no_side_effects()
+        });
+        self.print_expr_comment_list(&comments)
+    }
+
     pub(crate) fn print_all_remaining_orphan_comments(&mut self) {
         let mut comments = self
             .comments
@@ -632,11 +666,15 @@ impl Codegen<'_> {
         let comments = self
             .comments
             .take_matching_at(start, |comment| !comment.is_pure() && !comment.is_no_side_effects());
+        self.print_expr_comment_list(&comments)
+    }
+
+    fn print_expr_comment_list(&mut self, comments: &[Comment]) -> bool {
         if comments.is_empty() {
             return false;
         }
 
-        for comment in &comments {
+        for comment in comments {
             self.print_hard_newline();
             self.print_indent();
             self.print_comment(comment);

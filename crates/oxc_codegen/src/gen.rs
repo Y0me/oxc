@@ -655,6 +655,7 @@ impl Gen for CatchClause<'_> {
         p.print_soft_space();
         p.print_comments_at(self.span.start);
         p.print_str("catch");
+        let mut printed_header_comment = false;
         if let Some(param) = &self.param {
             p.print_soft_space();
             p.print_ascii_byte(b'(');
@@ -665,8 +666,19 @@ impl Gen for CatchClause<'_> {
                 type_annotation.print(p, ctx);
             }
             p.print_ascii_byte(b')');
+            let param_end = param
+                .type_annotation
+                .as_ref()
+                .map_or(param.pattern.span().end, |annotation| annotation.span.end);
+            if p.has_comments_in_range(param_end, self.body.span.start) {
+                p.print_soft_space();
+                printed_header_comment =
+                    p.print_comments_in_range_anchored_to_next(param_end, self.body.span.start);
+            }
         }
-        p.print_soft_space();
+        if !printed_header_comment {
+            p.print_soft_space();
+        }
         p.print_comments_at(self.body.span.start);
         // Flush the pending-indent-as-space flag so `/* */ {` doesn't
         // collapse to `/* */{`.
@@ -734,6 +746,12 @@ impl Gen for VariableDeclaration<'_> {
             p.print_soft_space();
         }
         p.print_list(&self.declarations, ctx);
+        if let Some(last) = self.declarations.last() {
+            if p.print_comments_in_range(last.span.end, self.span.end) {
+                p.clear_pending_indent_space();
+            }
+        }
+        p.print_comments_before_closing_delimiter(self.span.end);
     }
 }
 
@@ -820,8 +838,8 @@ impl Gen for Function<'_> {
                 }
             }
             self.params.print(p, ctx);
-            if self.params.span.end > 0 && p.has_comment(self.params.span.end - 1) {
-                p.print_leading_comments_anchored_to_self(self.params.span.end - 1);
+            if self.params.span.end > 0 {
+                p.print_comments_before_closing_delimiter(self.params.span.end - 1);
             }
             p.print_ascii_byte(b')');
             if let Some(return_type) = &self.return_type {
@@ -1032,6 +1050,12 @@ impl Gen for ImportDeclaration<'_> {
             }
             if in_block {
                 p.print_soft_space();
+                if let Some(last_specifier) = specifiers.last() {
+                    p.print_comments_in_range_anchored_to_next(
+                        last_specifier.span().end,
+                        self.source.span.start,
+                    );
+                }
                 p.print_ascii_byte(b'}');
                 p.print_soft_space();
             }
@@ -1170,6 +1194,7 @@ fn gen_export_specifiers(
         p.print_soft_space();
         p.print_list(specifiers, ctx);
         p.print_soft_space();
+        p.print_comments_in_range_anchored_to_next(specifiers.last().unwrap().span.end, span.end);
     }
     p.print_ascii_byte(b'}');
 }
@@ -1725,8 +1750,8 @@ impl Gen for ArrayExpression<'_> {
             p.dedent();
             p.print_indent();
         }
-        if self.span.end > 0 && p.has_comment(self.span.end - 1) {
-            p.print_leading_comments_anchored_to_self(self.span.end - 1);
+        if self.span.end > 0 {
+            p.print_comments_before_closing_delimiter(self.span.end - 1);
         }
         p.add_source_mapping_end(self.span);
         p.print_ascii_byte(b']');
@@ -1778,8 +1803,8 @@ impl GenExpr for ObjectExpression<'_> {
             } else if len > 0 {
                 p.print_soft_space();
             }
-            if self.span.end > 0 && p.has_comment(self.span.end - 1) {
-                p.print_leading_comments_anchored_to_self(self.span.end - 1);
+            if self.span.end > 0 {
+                p.print_comments_before_closing_delimiter(self.span.end - 1);
             }
             p.add_source_mapping_end(self.span);
             p.print_ascii_byte(b'}');
@@ -2362,8 +2387,14 @@ impl GenExpr for ImportExpression<'_> {
         let has_comment_before_right_paren = p.options.print_annotation_comment()
             && self.span.end > 0
             && p.has_comment(self.span.end - 1);
+        let trailing_gap_start =
+            self.options.as_ref().map_or(self.source.span().end, |options| options.span().end);
+        let has_comment_in_trailing_gap = p.options.print_annotation_comment()
+            && self.span.end > 0
+            && p.has_comments_in_range(trailing_gap_start, self.span.end - 1);
         let has_comment = p.options.print_annotation_comment()
-            && (has_comment_before_right_paren
+            && (has_comment_in_trailing_gap
+                || has_comment_before_right_paren
                 || p.has_comment(self.source.span().start)
                 || self
                     .options
@@ -2400,8 +2431,15 @@ impl GenExpr for ImportExpression<'_> {
                 options.gen_expr(p, Precedence::Comma, Context::empty());
             }
             if has_comment {
-                // Handle `/* comment */);`
-                if !has_comment_before_right_paren || !p.print_expr_comments(self.span.end - 1) {
+                let mut printed_trailing_comment = false;
+                if has_comment_in_trailing_gap {
+                    printed_trailing_comment |=
+                        p.print_expr_comments_in_range(trailing_gap_start, self.span.end - 1);
+                }
+                if has_comment_before_right_paren {
+                    printed_trailing_comment |= p.print_expr_comments(self.span.end - 1);
+                }
+                if !printed_trailing_comment {
                     p.print_soft_newline();
                 }
                 p.dedent();

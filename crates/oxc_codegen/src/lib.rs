@@ -619,6 +619,9 @@ impl<'a> Codegen<'a> {
             self.dedent();
             self.print_indent();
         }
+        if span.end > 0 {
+            self.print_comments_before_closing_delimiter(span.end - 1);
+        }
         self.add_source_mapping_end(span);
         self.print_ascii_byte(b'}');
     }
@@ -770,18 +773,29 @@ impl<'a> Codegen<'a> {
     fn print_arguments(&mut self, span: Span, arguments: &[Argument<'_>], ctx: Context) {
         self.print_ascii_byte(b'(');
 
-        let has_comment_before_right_paren = span.end > 0 && self.has_comment(span.end - 1);
+        let right_paren = span.end.saturating_sub(1);
+        let trailing_gap_start =
+            arguments.last().map_or(span.start, |argument| argument.span().end);
+        let has_comment_in_trailing_gap =
+            self.has_comments_in_range(trailing_gap_start, right_paren);
+        let has_comment_before_right_paren = span.end > 0 && self.has_comment(right_paren);
 
-        let has_comment = has_comment_before_right_paren
+        let has_comment = has_comment_in_trailing_gap
+            || has_comment_before_right_paren
             || arguments.iter().any(|item| self.has_comment(item.span().start));
 
         if has_comment {
             self.indent();
             self.print_list_with_comments(arguments, ctx);
-            // Handle `/* comment */);`
-            if !has_comment_before_right_paren
-                || (span.end > 0 && !self.print_expr_comments(span.end - 1))
-            {
+            let mut printed_trailing_comment = false;
+            if has_comment_in_trailing_gap {
+                printed_trailing_comment |=
+                    self.print_expr_comments_in_range(trailing_gap_start, right_paren);
+            }
+            if has_comment_before_right_paren {
+                printed_trailing_comment |= self.print_expr_comments(right_paren);
+            }
+            if !printed_trailing_comment {
                 self.print_soft_newline();
             }
             self.dedent();
