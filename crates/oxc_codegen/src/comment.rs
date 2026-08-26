@@ -4,7 +4,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use oxc_ast::{
-    Comment, CommentKind,
+    Comment, CommentContent, CommentKind,
     ast::{Expression, Program},
 };
 use oxc_span::GetSpan;
@@ -82,23 +82,17 @@ impl Codegen<'_> {
             // Stash pure / no-side-effects comments by `attached_to` so the
             // emission site can recover the verbatim source text instead of
             // falling back to the canonical literal (rolldown#9408).
-            // Best-effort: when several annotation comments share an
-            // `attached_to`, only the last survives; the emission site falls
-            // back to the canonical literal for the dropped ones.
             if comment.is_pure() || comment.is_no_side_effects() {
                 if comment.is_leading() && self.options.print_annotation_comment() {
-                    self.annotation_comments.insert(comment.attached_to, *comment);
+                    self.annotation_comments.entry(comment.attached_to).or_default().push(*comment);
                 }
                 continue;
             }
 
-            let mut add = false;
-            if comment.is_leading() {
-                add = (comment.is_legal() && self.options.print_legal_comment())
-                    || (comment.is_jsdoc() && self.options.print_jsdoc_comment())
-                    || (comment.is_annotation() && self.options.print_annotation_comment())
-                    || (comment.is_normal() && self.options.print_normal_comment());
-            }
+            let add = (comment.is_legal() && self.options.print_legal_comment())
+                || (comment.is_jsdoc() && self.options.print_jsdoc_comment())
+                || (comment.is_annotation() && self.options.print_annotation_comment())
+                || (comment.is_normal() && self.options.print_normal_comment());
 
             if add {
                 self.has_property_key_annotations |= comment.is_property_key_annotation();
@@ -140,14 +134,19 @@ impl Codegen<'_> {
         kind: AnnotationKind,
         newline_after: bool,
     ) {
-        if self.source_text.is_some()
-            && let Some(comment) = self.annotation_comments.get(&start).copied()
-            && kind.matches(&comment)
-            // Inline line comments would swallow the rest of the line.
-            && (!comment.is_line() || newline_after)
-        {
-            self.annotation_comments.remove(&start);
-            self.print_comment(&comment);
+        let has_compatible_annotation =
+            self.annotation_comments.get(&start).is_some_and(|comments| {
+                comments.iter().any(|comment| kind.matches(comment))
+                    && (newline_after || comments.iter().all(|comment| !comment.is_line()))
+            });
+        if self.source_text.is_some() && has_compatible_annotation {
+            let comments = self.annotation_comments.remove(&start).unwrap();
+            for (index, comment) in comments.iter().enumerate() {
+                if index != 0 {
+                    self.print_str(" ");
+                }
+                self.print_comment(comment);
+            }
             if newline_after {
                 self.print_hard_newline();
             } else {
@@ -159,7 +158,7 @@ impl Codegen<'_> {
     }
 
     pub(crate) fn print_leading_comments(&mut self, start: u32) {
-        if let Some(comments) = self.comments.remove(&start) {
+        if let Some(comments) = self.get_comments(start) {
             self.print_comments(&comments);
         }
     }
@@ -175,6 +174,86 @@ impl Codegen<'_> {
     pub(crate) fn print_comments_at(&mut self, start: u32) {
         if let Some(comments) = self.get_comments(start) {
             self.print_comments(&comments);
+        }
+    }
+
+    /// Print parser-attached annotations and JSDoc at a surviving AST node.
+    /// Normal comments keep using their existing syntax-specific emitters,
+    /// which preserve punctuation-sensitive spacing and transformed-AST
+    /// behavior. Invalid pure annotations and property-key annotations also
+    /// have dedicated emission sites.
+    fn has_attached_comments_at(&self, start: u32) -> bool {
+        self.comments.get(&start).is_some_and(|comments| {
+            comments.iter().any(|comment| {
+                comment.is_jsdoc()
+                    || (comment.is_annotation()
+                        && comment.content != CommentContent::PureNotApplied
+                        && !comment.is_property_key_annotation())
+            })
+        })
+    }
+
+    pub(crate) fn print_attached_comments_at(&mut self, start: u32) {
+        if self.has_attached_comments_at(start) {
+            self.print_comments_at(start);
+            if self.last_byte() != Some(b'\n') {
+                self.consume_pending_indent_space();
+            }
+        }
+    }
+
+    pub(crate) fn print_normal_comments_at(&mut self, start: u32) {
+        let should_print = self
+            .comments
+            .get(&start)
+            .is_some_and(|comments| comments.iter().any(|comment| comment.is_normal()));
+        if should_print {
+            self.print_comments_at(start);
+            if self.last_byte() != Some(b'\n') {
+                self.consume_pending_indent_space();
+            }
+        }
+    }
+
+    pub(crate) fn print_trailing_normal_comments_at(&mut self, end: u32) {
+        let should_print = self.comments.get(&end).is_some_and(|comments| {
+            comments.iter().any(|comment| comment.is_trailing() && comment.is_normal())
+        });
+        if should_print {
+            self.print_soft_space();
+            self.print_comments_at(end);
+            self.clear_pending_indent_space();
+        }
+    }
+
+    pub(crate) fn print_trailing_attached_comments_at(&mut self, end: u32) {
+        let should_print = self.comments.get(&end).is_some_and(|comments| {
+            comments.iter().any(|comment| {
+                comment.is_trailing()
+                    && (comment.is_jsdoc()
+                        || (comment.is_annotation() && !comment.is_property_key_annotation()))
+            })
+        });
+        if should_print {
+            self.print_soft_space();
+            self.print_comments_at(end);
+            self.clear_pending_indent_space();
+        }
+    }
+
+    pub(crate) fn print_attached_comments_before_expression(
+        &mut self,
+        expression: &Expression<'_>,
+    ) {
+        if self.comments.is_empty() || is_pife_function(expression) {
+            return;
+        }
+        let start = expression.span().start;
+        if self.has_attached_comments_at(start) {
+            self.print_leading_comments_anchored_to_self(start);
+        }
+        if let Expression::ParenthesizedExpression(paren) = expression {
+            self.print_attached_comments_before_expression(&paren.expression);
         }
     }
 
@@ -318,14 +397,22 @@ impl Codegen<'_> {
         if self.comments.is_empty() {
             return false;
         }
-        // Find and remove the first key in the range.
-        let key = self.comments.keys().find(|&&k| k > start && k < end).copied();
-        if let Some(key) = key {
-            let comments = self.comments.remove(&key).unwrap();
-            self.print_comments(&comments);
-            return true;
+        let mut keys: SmallVec<[u32; 4]> =
+            self.comments.keys().filter(|&&key| key > start && key < end).copied().collect();
+        if keys.is_empty() {
+            return false;
         }
-        false
+        keys.sort_unstable();
+        let mut comments = CommentList::new();
+        for key in keys {
+            comments.extend(self.comments.remove(&key).unwrap());
+        }
+        self.print_comments(&comments);
+        true
+    }
+
+    pub(crate) fn has_comments_in_range(&self, start: u32, end: u32) -> bool {
+        self.comments.keys().any(|&key| key > start && key < end)
     }
 
     pub(crate) fn print_expr_comments(&mut self, start: u32) -> bool {

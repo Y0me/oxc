@@ -131,13 +131,9 @@ pub struct Codegen<'a> {
 
     /// Pure / no-side-effects annotation comments keyed by `attached_to`,
     /// so the emission site can recover verbatim source text instead of a
-    /// canonicalised literal (rolldown#9408). The emission site falls back
-    /// to the canonical literal when (a) no comment is stashed, (b) the
-    /// stashed comment's kind doesn't match the emission site (mixed
-    /// `@__PURE__` and `@__NO_SIDE_EFFECTS__` on the same `attached_to`),
-    /// (c) the comment is a line comment but the site can't break the line,
-    /// or (d) source text isn't available.
-    annotation_comments: FxHashMap<u32, Comment>,
+    /// canonicalised literal (rolldown#9408). Keep all comments at an anchor
+    /// so repeated compiler hints are not silently discarded.
+    annotation_comments: FxHashMap<u32, smallvec::SmallVec<[Comment; 1]>>,
 
     /// Sorted, deduped `attached_to` keys for comments that must survive a
     /// removed anchor. Lets `print_orphan_comments_before` flush via

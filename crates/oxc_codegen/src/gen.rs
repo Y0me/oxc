@@ -24,7 +24,9 @@ pub trait Gen: GetSpan {
     /// Generate code for an AST node. Alias for `gen`.
     #[inline]
     fn print(&self, p: &mut Codegen, ctx: Context) {
+        p.print_attached_comments_at(self.span().start);
         self.r#gen(p, ctx);
+        p.print_trailing_attached_comments_at(self.span().end);
     }
 }
 
@@ -746,8 +748,18 @@ impl Gen for VariableDeclarator<'_> {
         }
         if let Some(init) = &self.init {
             p.print_soft_space();
+            let binding_end = self
+                .type_annotation
+                .as_ref()
+                .map_or(self.id.span().end, |annotation| annotation.span.end);
+            if p.print_comments_in_range(binding_end, init.span().start) {
+                p.consume_pending_indent_space();
+            }
             p.print_equal();
             p.print_soft_space();
+            if matches!(init, Expression::Identifier(_)) {
+                p.print_normal_comments_at(init.span().start);
+            }
             init.print_expr(p, Precedence::Comma, ctx);
         }
     }
@@ -775,6 +787,17 @@ impl Gen for Function<'_> {
             }
             p.print_str("function");
             if self.generator {
+                let next_node_start =
+                    self.id.as_ref().map_or(self.params.span.start, |id| id.span.start);
+                if p.has_comments_in_range(self.span.start, next_node_start) {
+                    p.print_soft_space();
+                    p.print_comments_in_range(self.span.start, next_node_start);
+                    if p.last_byte() == Some(b'\n') {
+                        p.print_indent();
+                    } else {
+                        p.consume_pending_indent_space();
+                    }
+                }
                 p.print_ascii_byte(b'*');
                 p.print_soft_space();
             }
@@ -784,6 +807,10 @@ impl Gen for Function<'_> {
             }
             if let Some(type_parameters) = &self.type_parameters {
                 type_parameters.print(p, ctx);
+            }
+            if p.has_comment(self.params.span.start) {
+                p.print_soft_space();
+                p.print_leading_comments_anchored_to_self(self.params.span.start);
             }
             p.print_ascii_byte(b'(');
             if let Some(this_param) = &self.this_param {
@@ -1290,6 +1317,7 @@ impl Gen for ExportDefaultDeclarationKind<'_> {
 
 impl GenExpr for Expression<'_> {
     fn gen_expr(&self, p: &mut Codegen, precedence: Precedence, ctx: Context) {
+        p.print_attached_comments_before_expression(self);
         match self {
             // Most common expressions first (identifiers, member access, calls)
             Self::Identifier(ident) => ident.print(p, ctx),
@@ -1333,7 +1361,11 @@ impl GenExpr for Expression<'_> {
                         false,
                     );
                 }
-                func.print(p, ctx);
+                if func.pife {
+                    func.r#gen(p, ctx);
+                } else {
+                    func.print(p, ctx);
+                }
             }
             // This and super
             Self::ThisExpression(expr) => expr.print(p, ctx),
@@ -1375,6 +1407,7 @@ impl GenExpr for Expression<'_> {
             // V8 intrinsics (rare)
             Self::V8IntrinsicExpression(e) => e.print_expr(p, precedence, ctx),
         }
+        p.print_trailing_attached_comments_at(self.span().end);
     }
 }
 
@@ -1403,10 +1436,12 @@ impl Gen for IdentifierName<'_> {
 
 impl Gen for BindingIdentifier<'_> {
     fn r#gen(&self, p: &mut Codegen, _ctx: Context) {
+        p.print_normal_comments_at(self.span.start);
         let name = p.get_binding_identifier_name(self);
         p.print_space_before_identifier();
         p.add_source_mapping_for_name(self.span, name);
         p.print_str(name);
+        p.print_trailing_normal_comments_at(self.span.end);
     }
 }
 

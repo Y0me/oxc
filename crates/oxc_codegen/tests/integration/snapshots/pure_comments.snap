@@ -279,7 +279,7 @@ const defineSSRCustomElement = () => {
         
 ----------
 const defineSSRCustomElement = () => {
-	return /* @__PURE__ */ defineCustomElement(options, extraOptions, hydrate);
+	return /* @__PURE__ */ /* @__NO_SIDE_EFFECTS__ */ /* #__NO_SIDE_EFFECTS__ */ defineCustomElement(options, extraOptions, hydrate);
 };
 
 ########## 20
