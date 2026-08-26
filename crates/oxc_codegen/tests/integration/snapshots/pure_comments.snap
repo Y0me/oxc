@@ -143,9 +143,7 @@ export async function* d() {}
 /* @__NO_SIDE_EFFECTS__ */
 export default async function() {}
 /* @__NO_SIDE_EFFECTS__ */
-/* @__NO_SIDE_EFFECTS__ */
 export default function() {}
-/* @__NO_SIDE_EFFECTS__ */
 
 ########## 7
 
@@ -158,14 +156,10 @@ export default function() {}
         
 ----------
 export var v0 = function() {}, v1 = function() {};
-/* #__NO_SIDE_EFFECTS__ */
 export let l0 = function() {}, l1 = function() {};
-/* #__NO_SIDE_EFFECTS__ */
 export const c0 = /* #__NO_SIDE_EFFECTS__ */ function() {}, c1 = function() {};
 export var v2 = () => {}, v3 = () => {};
-/* #__NO_SIDE_EFFECTS__ */
 export let l2 = () => {}, l3 = () => {};
-/* #__NO_SIDE_EFFECTS__ */
 export const c2 = /* #__NO_SIDE_EFFECTS__ */ () => {}, c3 = () => {};
 
 ########## 8
@@ -179,14 +173,10 @@ export const c2 = /* #__NO_SIDE_EFFECTS__ */ () => {}, c3 = () => {};
         
 ----------
 var v0 = function() {}, v1 = function() {};
-/* #__NO_SIDE_EFFECTS__ */
 let l0 = function() {}, l1 = function() {};
-/* #__NO_SIDE_EFFECTS__ */
 const c0 = /* #__NO_SIDE_EFFECTS__ */ function() {}, c1 = function() {};
 var v2 = () => {}, v3 = () => {};
-/* #__NO_SIDE_EFFECTS__ */
 let l2 = () => {}, l3 = () => {};
-/* #__NO_SIDE_EFFECTS__ */
 const c2 = /* #__NO_SIDE_EFFECTS__ */ () => {}, c3 = () => {};
 
 ########## 9
@@ -200,8 +190,6 @@ isFunction(options)
                 
 ----------
 isFunction(options) ? /*#__PURE__*/ (() => extend({ name: options.name }, extraOptions, { setup: options }))() : options;
-// #8326: extend call and options.name access are considered side-effects
-// by Rollup, so we have to wrap it in a pure-annotated IIFE.
 
 ########## 10
 isFunction(options) ? /*#__PURE__*/ (() => extend({ name: options.name }, extraOptions, { setup: options }))() : options;
@@ -282,7 +270,6 @@ const defineSSRCustomElement = /* @__NO_SIDE_EFFECTS__ */ (
 const defineSSRCustomElement = /* @__NO_SIDE_EFFECTS__ */ (options, extraOptions) => {
 	return /* @__PURE__ */ defineCustomElement(options, extraOptions, hydrate);
 };
-/* #__NO_SIDE_EFFECTS__ */
 
 ########## 19
 
@@ -302,7 +289,6 @@ const defineSSRCustomElement = () => {
         
 ----------
 const Component = /* @__PURE__ */ React.forwardRef((props, ref) => {});
-// #__PURE__
 
 ########## 21
 
@@ -410,27 +396,17 @@ let new_nested_no = [
 	2
 ];
 let single_at_yes = /* @__PURE__ */ foo(bar);
-// @__PURE__
 let single_at_no = /* @__PURE__ */ foo(bar());
-// @__PURE__
 let new_single_at_yes = /* @__PURE__ */ new foo(bar);
-// @__PURE__
 let new_single_at_no = /* @__PURE__ */ new foo(bar());
-// @__PURE__
 let single_num_yes = /* @__PURE__ */ foo(bar);
-// #__PURE__
 let single_num_no = /* @__PURE__ */ foo(bar());
-// #__PURE__
 let new_single_num_yes = /* @__PURE__ */ new foo(bar);
-// #__PURE__
 let new_single_num_no = /* @__PURE__ */ new foo(bar());
-// #__PURE__
 let bad_no = /* __PURE__ */ foo(bar);
 let new_bad_no = /* __PURE__ */ new foo(bar);
 let parens_no = foo(bar);
-/* @__PURE__ */
 let new_parens_no = new foo(bar);
-/* @__PURE__ */
 let exp_no = /* @__PURE__ */ foo() ** foo();
 let new_exp_no = /* @__PURE__ */ new foo() ** foo();
 

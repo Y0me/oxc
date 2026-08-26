@@ -750,17 +750,14 @@ impl Gen for VariableDeclarator<'_> {
         }
         if let Some(init) = &self.init {
             p.print_soft_space();
+            p.print_equal();
+            p.print_soft_space();
             let binding_end = self
                 .type_annotation
                 .as_ref()
                 .map_or(self.id.span().end, |annotation| annotation.span.end);
             if p.print_comments_in_range(binding_end, init.span().start) {
                 p.consume_pending_indent_space();
-            }
-            p.print_equal();
-            p.print_soft_space();
-            if matches!(init, Expression::Identifier(_)) {
-                p.print_normal_comments_at(init.span().start);
             }
             init.print_expr(p, Precedence::Comma, ctx);
         }
@@ -823,6 +820,9 @@ impl Gen for Function<'_> {
                 }
             }
             self.params.print(p, ctx);
+            if self.params.span.end > 0 && p.has_comment(self.params.span.end - 1) {
+                p.print_leading_comments_anchored_to_self(self.params.span.end - 1);
+            }
             p.print_ascii_byte(b')');
             if let Some(return_type) = &self.return_type {
                 p.print_colon();
@@ -1458,12 +1458,10 @@ impl Gen for IdentifierName<'_> {
 
 impl Gen for BindingIdentifier<'_> {
     fn r#gen(&self, p: &mut Codegen, _ctx: Context) {
-        p.print_normal_comments_at(self.span.start);
         let name = p.get_binding_identifier_name(self);
         p.print_space_before_identifier();
         p.add_source_mapping_for_name(self.span, name);
         p.print_str(name);
-        p.print_trailing_normal_comments_at(self.span.end);
     }
 }
 
@@ -1727,6 +1725,9 @@ impl Gen for ArrayExpression<'_> {
             p.dedent();
             p.print_indent();
         }
+        if self.span.end > 0 && p.has_comment(self.span.end - 1) {
+            p.print_leading_comments_anchored_to_self(self.span.end - 1);
+        }
         p.add_source_mapping_end(self.span);
         p.print_ascii_byte(b']');
     }
@@ -1738,7 +1739,9 @@ impl GenExpr for ObjectExpression<'_> {
         let len = self.properties.len();
         let is_multi_line = len > 1;
         let has_comment = p.has_comment(self.span.start);
-        let wrap = has_comment || p.start_of_stmt == n || p.start_of_arrow_expr == n;
+        let wrap = p.has_normal_comment(self.span.start)
+            || p.start_of_stmt == n
+            || p.start_of_arrow_expr == n;
         p.wrap(wrap, |p| {
             // Print comments for lingui https://lingui.dev/ref/macro#definemessage
             // `const message = /*i18n*/ { };`
@@ -1774,6 +1777,9 @@ impl GenExpr for ObjectExpression<'_> {
                 p.print_indent();
             } else if len > 0 {
                 p.print_soft_space();
+            }
+            if self.span.end > 0 && p.has_comment(self.span.end - 1) {
+                p.print_leading_comments_anchored_to_self(self.span.end - 1);
             }
             p.add_source_mapping_end(self.span);
             p.print_ascii_byte(b'}');

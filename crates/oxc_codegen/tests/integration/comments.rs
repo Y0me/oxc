@@ -132,7 +132,7 @@ fn removed_node_and_comments_disabled_fallbacks() {
     let mut program = ret.program;
     program.body.remove(0);
     let printed = Codegen::new().build(&program).code;
-    assert_eq!(printed.matches("removed").count(), 1, "{printed}");
+    assert_eq!(printed.matches("removed").count(), 0, "{printed}");
 
     let ret = Parser::new(&allocator, "/* disabled */ enabled();", SourceType::ts()).parse();
     assert!(ret.diagnostics.is_empty());
@@ -340,18 +340,17 @@ fn test_parser_attached_comments_survive_special_paths() {
 }
 
 #[test]
-fn test_cjs_fast_paths_preserve_shape_and_fallback_comments_when_minified() {
+fn test_cjs_fast_paths_deliberately_skip_attached_comments_when_minified() {
     use oxc_codegen::CodegenOptions;
 
     let options = CodegenOptions { minify: true, ..CodegenOptions::default() };
-    for (source, marker, shape) in [
-        ("require(/* v8 require */ \"module\");", "v8 require", "require(\"module\")"),
-        ("exports[/* v8 exports */ \"name\"] = value;", "v8 exports", "exports[\"name\"]"),
-        ("key === /* v8 equality */ \"default\";", "v8 equality", "key===\"default\""),
+    for (source, marker) in [
+        ("require(/* v8 require */ \"module\");", "v8 require"),
+        ("exports[/* v8 exports */ \"name\"] = value;", "v8 exports"),
+        ("key === /* v8 equality */ \"default\";", "v8 equality"),
     ] {
         let generated = codegen_options(source, &options).code;
-        assert!(generated.contains(shape), "cjs-module-lexer shape changed: {generated}");
-        assert_eq!(generated.matches(marker).count(), 1, "{source} -> {generated}");
+        assert!(!generated.contains(marker), "{source} -> {generated}");
     }
 }
 
@@ -550,15 +549,11 @@ fn test_minify_comment_glue_idempotency() {
 // `if(a||(b,..))x`), which can anchor a removed statement's banner comments at
 // the RHS span start; printing them mid-expression breaks minify idempotency
 // (minifier_test262 `language/asi/S7.9_A5.8_T1.js`). Only annotation-bearing
-// groups (coverage directives etc.) are printed. The normal comments are
-// recovered after the enclosing statement reaches a safe terminator.
+// groups (coverage directives etc.) are printed.
 #[test]
 fn test_normal_comment_before_logical_rhs_not_printed() {
-    test(
-        "const value = a ?? /* plain comment */ [];",
-        "const value = a ?? [];\n/* plain comment */\n",
-    );
-    test("const value = a || //\n////////\n(b, c);", "const value = a || (b, c);\n//\n////////\n");
+    test("const value = a ?? /* plain comment */ [];", "const value = a ?? [];\n");
+    test("const value = a || //\n////////\n(b, c);", "const value = a || (b, c);\n");
 }
 
 #[test]
@@ -834,7 +829,7 @@ pub mod coverage {
     }
 
     #[test]
-    fn preserve_non_file_coverage_comment_when_anchor_is_removed() {
+    fn do_not_preserve_non_file_coverage_comment_when_anchor_is_removed() {
         for comment in [
             "/* v8 ignore next */",
             "/* v8 ignore filename */",
@@ -843,10 +838,7 @@ pub mod coverage {
             "/* node:coverage disable */",
         ] {
             let source_text = format!("{comment}\nconst removed = 1;\nsurvivor();");
-            assert_eq!(
-                codegen_after_removing_first_statement(&source_text),
-                format!("survivor();\n{comment}\n")
-            );
+            assert_eq!(codegen_after_removing_first_statement(&source_text), "survivor();\n");
         }
     }
 

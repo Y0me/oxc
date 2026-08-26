@@ -171,28 +171,6 @@ impl CommentStore {
         comments
     }
 
-    fn take_remaining_in(&mut self, start: u32, end: u32) -> CommentList {
-        if start > end {
-            return CommentList::new();
-        }
-        let (first, last) = self.bounds(start, end, true);
-        take_groups(&mut self.groups[first..last])
-    }
-
-    fn has_remaining_in(&self, start: u32, end: u32) -> bool {
-        if start > end {
-            return false;
-        }
-        let (first, last) = self.bounds(start, end, true);
-        self.groups[first..last]
-            .iter()
-            .any(|group| !group.leading.is_empty() || !group.trailing.is_empty())
-    }
-
-    fn take_all_remaining(&mut self) -> CommentList {
-        take_groups(&mut self.groups)
-    }
-
     fn has_matching_before(&self, end: u32, predicate: impl Fn(&Comment) -> bool) -> bool {
         let last = self.groups.partition_point(|group| group.anchor < end);
         self.groups[..last]
@@ -227,16 +205,6 @@ fn take_matching(comments: &mut CommentList, predicate: impl Fn(&Comment) -> boo
         }
     });
     taken
-}
-
-fn take_groups(groups: &mut [CommentGroup]) -> CommentList {
-    let mut comments = CommentList::new();
-    for group in groups {
-        comments.extend(std::mem::take(&mut group.leading));
-        comments.extend(std::mem::take(&mut group.trailing));
-    }
-    comments.sort_unstable_by_key(|comment| comment.span.start);
-    comments
 }
 
 /// Whether a comment remains meaningful if its original AST anchor is removed.
@@ -331,6 +299,12 @@ impl Codegen<'_> {
 
     pub(crate) fn has_comment(&self, start: u32) -> bool {
         self.comments.has_non_semantic_at(start)
+    }
+
+    pub(crate) fn has_normal_comment(&self, start: u32) -> bool {
+        self.comments
+            .leading_at(start)
+            .is_some_and(|comments| comments.iter().any(|comment| comment.is_normal()))
     }
 
     /// Emit a pure / no-side-effects annotation comment for the AST node at
@@ -443,35 +417,6 @@ impl Codegen<'_> {
             if self.last_byte() != Some(b'\n') {
                 self.consume_pending_indent_space();
             }
-        }
-    }
-
-    pub(crate) fn print_normal_comments_at(&mut self, start: u32) {
-        let should_print = self
-            .comments
-            .leading_at(start)
-            .is_some_and(|comments| comments.iter().any(|comment| comment.is_normal()));
-        if should_print {
-            let comments =
-                self.comments.take_matching_leading_at(start, |comment| comment.is_normal());
-            self.print_comments(&comments);
-            if self.last_byte() != Some(b'\n') {
-                self.consume_pending_indent_space();
-            }
-        }
-    }
-
-    pub(crate) fn print_trailing_normal_comments_at(&mut self, end: u32) {
-        let should_print = self
-            .comments
-            .trailing_at(end)
-            .is_some_and(|comments| comments.iter().any(|comment| comment.is_normal()));
-        if should_print {
-            self.print_soft_space();
-            let comments =
-                self.comments.take_matching_trailing_at(end, |comment| comment.is_normal());
-            self.print_comments(&comments);
-            self.clear_pending_indent_space();
         }
     }
 
@@ -667,26 +612,10 @@ impl Codegen<'_> {
         self.comments.has_between(start, end)
     }
 
-    pub(crate) fn has_remaining_comments_in_span(&self, span: oxc_span::Span) -> bool {
-        self.comments.has_remaining_in(span.start, span.end)
-    }
-
-    pub(crate) fn print_remaining_comments_in_span(&mut self, span: oxc_span::Span) {
-        let mut comments = self.comments.take_remaining_in(span.start, span.end);
-        if comments.is_empty() {
-            return;
-        }
-        if self.last_byte() != Some(b'\n')
-            && comments.first().is_some_and(|comment| !comment.preceded_by_newline())
-        {
-            self.print_soft_space();
-        }
-        comments.last_mut().unwrap().set_followed_by_newline(true);
-        self.print_comments(&comments);
-    }
-
-    pub(crate) fn print_all_remaining_comments(&mut self) {
-        let mut comments = self.comments.take_all_remaining();
+    pub(crate) fn print_all_remaining_orphan_comments(&mut self) {
+        let mut comments = self
+            .comments
+            .take_matching_before(u32::MAX, |comment| preserve_when_orphaned(*comment));
         if comments.is_empty() {
             return;
         }

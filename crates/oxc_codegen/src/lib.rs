@@ -252,7 +252,7 @@ impl<'a> Codegen<'a> {
             self.sourcemap_builder = Some(SourcemapBuilder::new(path, program.source_text));
         }
         program.print(&mut self, Context::default());
-        self.print_all_remaining_comments();
+        self.print_all_remaining_orphan_comments();
         let legal_comments = self.handle_eof_linked_or_external_comments(program);
         let code = self.code.into_string();
         #[cfg(feature = "sourcemap")]
@@ -678,10 +678,6 @@ impl<'a> Codegen<'a> {
             self.print_orphan_comments_before(stmt.span().start);
             self.print_semicolon_if_needed();
             stmt.print(self, ctx);
-            if self.has_remaining_comments_in_span(stmt.span()) {
-                self.print_semicolon_if_needed();
-                self.print_remaining_comments_in_span(stmt.span());
-            }
         }
         self.print_orphan_comments_before(scope_end);
     }
@@ -740,11 +736,6 @@ impl<'a> Codegen<'a> {
             self.print_semicolon_after_statement();
         } else {
             first.print(self, ctx);
-        }
-
-        if self.has_remaining_comments_in_span(first.span()) {
-            self.print_semicolon_if_needed();
-            self.print_remaining_comments_in_span(first.span());
         }
 
         self.print_stmts_with_orphan_flush(rest, scope_end, ctx);
