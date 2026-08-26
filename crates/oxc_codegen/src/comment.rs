@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use oxc_ast::{
@@ -17,6 +17,8 @@ type CommentList = SmallVec<[Comment; 1]>;
 #[derive(Default)]
 pub struct CommentStore {
     groups: Vec<CommentGroup>,
+    indices: FxHashMap<u32, usize>,
+    remaining: usize,
 }
 
 struct CommentGroup {
@@ -27,10 +29,13 @@ struct CommentGroup {
 
 impl CommentStore {
     fn build(comments: &mut Vec<Comment>) -> Self {
+        let remaining = comments.len();
         comments.sort_unstable_by_key(|comment| (comment.attached_to, comment.span.start));
         let mut groups = Vec::<CommentGroup>::new();
+        let mut indices = FxHashMap::default();
         for comment in comments.drain(..) {
             if groups.last().is_none_or(|group| group.anchor != comment.attached_to) {
+                indices.insert(comment.attached_to, groups.len());
                 groups.push(CommentGroup {
                     anchor: comment.attached_to,
                     leading: CommentList::new(),
@@ -44,16 +49,21 @@ impl CommentStore {
                 group.trailing.push(comment);
             }
         }
-        Self { groups }
+        Self { groups, indices, remaining }
     }
 
     #[inline]
-    fn index(&self, anchor: u32) -> Result<usize, usize> {
-        self.groups.binary_search_by_key(&anchor, |group| group.anchor)
+    fn is_empty(&self) -> bool {
+        self.remaining == 0
+    }
+
+    #[inline]
+    fn index(&self, anchor: u32) -> Option<usize> {
+        self.indices.get(&anchor).copied()
     }
 
     fn has_non_semantic_at(&self, anchor: u32) -> bool {
-        self.index(anchor).is_ok_and(|index| {
+        self.index(anchor).is_some_and(|index| {
             let group = &self.groups[index];
             group
                 .leading
@@ -65,26 +75,34 @@ impl CommentStore {
 
     #[inline]
     fn leading_at(&self, anchor: u32) -> Option<&CommentList> {
-        let group = self.index(anchor).ok().map(|index| &self.groups[index])?;
+        let group = self.index(anchor).map(|index| &self.groups[index])?;
         (!group.leading.is_empty()).then_some(&group.leading)
     }
 
     #[inline]
     fn trailing_at(&self, anchor: u32) -> Option<&CommentList> {
-        let group = self.index(anchor).ok().map(|index| &self.groups[index])?;
+        let group = self.index(anchor).map(|index| &self.groups[index])?;
         (!group.trailing.is_empty()).then_some(&group.trailing)
     }
 
     fn take_leading_at(&mut self, anchor: u32) -> Option<CommentList> {
-        let index = self.index(anchor).ok()?;
-        (!self.groups[index].leading.is_empty())
-            .then(|| std::mem::take(&mut self.groups[index].leading))
+        let index = self.index(anchor)?;
+        if self.groups[index].leading.is_empty() {
+            return None;
+        }
+        let comments = std::mem::take(&mut self.groups[index].leading);
+        self.remaining -= comments.len();
+        Some(comments)
     }
 
     fn take_trailing_at(&mut self, anchor: u32) -> Option<CommentList> {
-        let index = self.index(anchor).ok()?;
-        (!self.groups[index].trailing.is_empty())
-            .then(|| std::mem::take(&mut self.groups[index].trailing))
+        let index = self.index(anchor)?;
+        if self.groups[index].trailing.is_empty() {
+            return None;
+        }
+        let comments = std::mem::take(&mut self.groups[index].trailing);
+        self.remaining -= comments.len();
+        Some(comments)
     }
 
     fn take_matching_at(
@@ -92,11 +110,12 @@ impl CommentStore {
         anchor: u32,
         predicate: impl Fn(&Comment) -> bool + Copy,
     ) -> CommentList {
-        let Ok(index) = self.index(anchor) else { return CommentList::new() };
+        let Some(index) = self.index(anchor) else { return CommentList::new() };
         let group = &mut self.groups[index];
         let mut comments = take_matching(&mut group.leading, predicate);
         comments.extend(take_matching(&mut group.trailing, predicate));
         comments.sort_unstable_by_key(|comment| comment.span.start);
+        self.remaining -= comments.len();
         comments
     }
 
@@ -105,8 +124,10 @@ impl CommentStore {
         anchor: u32,
         predicate: impl Fn(&Comment) -> bool,
     ) -> CommentList {
-        let Ok(index) = self.index(anchor) else { return CommentList::new() };
-        take_matching(&mut self.groups[index].leading, predicate)
+        let Some(index) = self.index(anchor) else { return CommentList::new() };
+        let comments = take_matching(&mut self.groups[index].leading, predicate);
+        self.remaining -= comments.len();
+        comments
     }
 
     fn nearest_matching_leading_anchor(
@@ -127,8 +148,10 @@ impl CommentStore {
         anchor: u32,
         predicate: impl Fn(&Comment) -> bool,
     ) -> CommentList {
-        let Ok(index) = self.index(anchor) else { return CommentList::new() };
-        take_matching(&mut self.groups[index].trailing, predicate)
+        let Some(index) = self.index(anchor) else { return CommentList::new() };
+        let comments = take_matching(&mut self.groups[index].trailing, predicate);
+        self.remaining -= comments.len();
+        comments
     }
 
     #[inline]
@@ -168,6 +191,7 @@ impl CommentStore {
             comments.extend(take_matching(&mut group.trailing, predicate));
         }
         comments.sort_unstable_by_key(|comment| comment.span.start);
+        self.remaining -= comments.len();
         comments
     }
 
@@ -190,6 +214,7 @@ impl CommentStore {
             comments.extend(take_matching(&mut group.trailing, predicate));
         }
         comments.sort_unstable_by_key(|comment| comment.span.start);
+        self.remaining -= comments.len();
         comments
     }
 }
@@ -388,6 +413,7 @@ impl Codegen<'_> {
     /// which preserve punctuation-sensitive spacing and transformed-AST
     /// behavior. Invalid pure annotations and property-key annotations also
     /// have dedicated emission sites.
+    #[inline]
     fn has_attached_comments_at(&self, start: u32) -> bool {
         self.comments.leading_at(start).is_some_and(|comments| {
             comments.iter().any(|comment| {
@@ -402,7 +428,11 @@ impl Codegen<'_> {
         })
     }
 
+    #[inline]
     pub(crate) fn print_attached_comments_at(&mut self, start: u32) {
+        if self.comments.is_empty() {
+            return;
+        }
         if self.has_attached_comments_at(start) {
             let comments = self.comments.take_matching_leading_at(start, |comment| {
                 (!self.suppress_normal_comments && comment.is_normal())
@@ -420,7 +450,11 @@ impl Codegen<'_> {
         }
     }
 
+    #[inline]
     pub(crate) fn print_trailing_attached_comments_at(&mut self, end: u32) {
+        if self.comments.is_empty() {
+            return;
+        }
         let source_text = self.source_text;
         let should_print = self.comments.trailing_at(end).is_some_and(|comments| {
             comments.iter().any(|comment| {
