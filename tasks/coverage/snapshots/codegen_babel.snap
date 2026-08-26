@@ -2,4 +2,20 @@ commit: 1eac4481
 
 codegen_babel Summary:
 AST Parsed     : 2234/2234 (100.00%)
-Positive Passed: 2234/2234 (100.00%)
+Positive Passed: 2226/2234 (99.64%)
+Normal: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/class-method/input.js
+
+Normal: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/class-method-static-generator/input.js
+
+Normal: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/class-private-method/input.js
+
+Normal: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/class-static-block/input.js
+
+Normal: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/try-statement/input.js
+
+Normal: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/decorators/decorators-before-export/input.js
+
+Normal: tasks/coverage/babel/packages/babel-parser/test/fixtures/core/uncategorised/47/input.js
+
+Normal: tasks/coverage/babel/packages/babel-parser/test/fixtures/core/uncategorised/48/input.js
+

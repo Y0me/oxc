@@ -617,10 +617,22 @@ impl<'a> Codegen<'a> {
         op(self);
         if !single_line {
             self.dedent();
+            let close = span.end.saturating_sub(1);
+            if self.has_comment(close) {
+                self.indent();
+                self.print_indent();
+                self.print_comments_before_closing_delimiter(close);
+                self.dedent();
+                if self.last_byte() != Some(b'\n') {
+                    self.print_hard_newline();
+                }
+            }
             self.print_indent();
-        }
-        if span.end > 0 {
+        } else if span.end > 0 {
             self.print_comments_before_closing_delimiter(span.end - 1);
+            if self.last_byte() == Some(b'\n') {
+                self.print_indent();
+            }
         }
         self.add_source_mapping_end(span);
         self.print_ascii_byte(b'}');
@@ -787,14 +799,8 @@ impl<'a> Codegen<'a> {
         if has_comment {
             self.indent();
             self.print_list_with_comments(arguments, ctx);
-            let mut printed_trailing_comment = false;
-            if has_comment_in_trailing_gap {
-                printed_trailing_comment |=
-                    self.print_expr_comments_in_range(trailing_gap_start, right_paren);
-            }
-            if has_comment_before_right_paren {
-                printed_trailing_comment |= self.print_expr_comments(right_paren);
-            }
+            let printed_trailing_comment =
+                self.print_expr_comments_before_closing_delimiter(trailing_gap_start, right_paren);
             if !printed_trailing_comment {
                 self.print_soft_newline();
             }

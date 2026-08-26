@@ -2,6 +2,52 @@ commit: 1eac4481
 
 transformer_babel Summary:
 AST Parsed     : 2234/2234 (100.00%)
-Positive Passed: 2233/2234 (99.96%)
+Positive Passed: 2210/2234 (98.93%)
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/async-call-expression/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/call-expression-no-argument/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/class-accessor-computed/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/class-method/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/class-method-static-generator/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/class-static-block/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/directive/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/new-expression-no-argument/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/object-accessor-computed/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/sequence-expression/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/switch-case/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/switch-no-case-comment/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/try-statement/input.js
+
 Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/core/opts/allowYieldOutsideFunction-true-2/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/core/uncategorised/305/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/core/uncategorised/308/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/core/uncategorised/311/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/core/uncategorised/47/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/core/uncategorised/48/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/esprima/automatic-semicolon-insertion/migrated_0005/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/esprima/automatic-semicolon-insertion/migrated_0008/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/esprima/automatic-semicolon-insertion/migrated_0011/input.js
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/typescript/cast/as/input.ts
+
+Mismatch: tasks/coverage/babel/packages/babel-parser/test/fixtures/typescript/cast/satisfies/input.ts
 

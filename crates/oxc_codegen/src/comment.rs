@@ -75,7 +75,7 @@ impl CommentStore {
         Self { groups, anchor_bits, orphan_indices, remaining }
     }
 
-    #[inline(always)]
+    #[inline]
     fn may_have_anchor(&self, anchor: u32) -> bool {
         if self.remaining == 0 {
             return false;
@@ -293,7 +293,7 @@ fn is_html_comment(comment: Comment, source_text: Option<&str>) -> bool {
 
 /// A `pife`-marked arrow or function expression prints its leading comments
 /// inside its own `(` wrap, so operand emission sites must not consume them.
-pub(crate) fn is_pife_function(expression: &Expression<'_>) -> bool {
+pub fn is_pife_function(expression: &Expression<'_>) -> bool {
     match expression {
         Expression::ArrowFunctionExpression(arrow) => arrow.pife,
         Expression::FunctionExpression(function) => function.pife,
@@ -474,7 +474,7 @@ impl Codegen<'_> {
         })
     }
 
-    #[inline(always)]
+    #[inline]
     pub(crate) fn print_attached_comments_at(&mut self, start: u32) {
         if !self.comments.may_have_anchor(start) {
             return;
@@ -502,7 +502,7 @@ impl Codegen<'_> {
         }
     }
 
-    #[inline(always)]
+    #[inline]
     pub(crate) fn print_trailing_attached_comments_at(&mut self, end: u32) {
         if !self.comments.may_have_anchor(end) {
             return;
@@ -523,7 +523,9 @@ impl Codegen<'_> {
             })
         });
         if should_print {
-            self.print_soft_space();
+            if self.last_byte() != Some(b'\n') {
+                self.print_soft_space();
+            }
             let has_html = self.comments.trailing_at(end).is_some_and(|comments| {
                 comments.iter().any(|comment| is_html_comment(*comment, source_text))
             });
@@ -706,9 +708,7 @@ impl Codegen<'_> {
     pub(crate) fn print_comments_before_closing_delimiter(&mut self, close: u32) -> bool {
         let Some(comments) = self.comments.take_leading_at(close) else { return false };
         self.print_comments(&comments);
-        if self.last_byte() == Some(b'\n') {
-            self.print_indent();
-        } else {
+        if self.last_byte() != Some(b'\n') {
             self.consume_pending_indent_space();
         }
         true
@@ -730,10 +730,18 @@ impl Codegen<'_> {
         true
     }
 
-    pub(crate) fn print_expr_comments_in_range(&mut self, start: u32, end: u32) -> bool {
-        let comments = self.comments.take_between(start, end, |comment| {
+    pub(crate) fn print_expr_comments_before_closing_delimiter(
+        &mut self,
+        start: u32,
+        close: u32,
+    ) -> bool {
+        let mut comments = self.comments.take_between(start, close, |comment| {
             !comment.is_pure() && !comment.is_no_side_effects()
         });
+        comments.extend(self.comments.take_matching_leading_at(close, |comment| {
+            !comment.is_pure() && !comment.is_no_side_effects()
+        }));
+        comments.sort_unstable_by_key(|comment| comment.span.start);
         self.print_expr_comment_list(&comments)
     }
 

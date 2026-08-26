@@ -33,7 +33,7 @@ fn comments_are_not_lost() {
                 printed.matches(expected_comment_content).count(),
                 1,
                 "expected comment content `{expected_comment_content}` exactly once in printed: `{printed}`, original: `{original_source_text}`"
-            )
+            );
         }
     }
 }

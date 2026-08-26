@@ -2,4 +2,64 @@ commit: b465fdbf
 
 codegen_typescript Summary:
 AST Parsed     : 9783/9783 (100.00%)
-Positive Passed: 9783/9783 (100.00%)
+Positive Passed: 9753/9783 (99.69%)
+Normal: tasks/coverage/typescript/tests/cases/compiler/assignmentCompatability_checking-apply-member-off-of-function-interface.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/assignmentCompatability_checking-call-member-off-of-function-interface.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/collisionRestParameterInType.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/collisionRestParameterInterfaceMembers.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/commentEmitOnParenthesizedAssertionInReturnStatement.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/commentEmitOnParenthesizedAssertionInReturnStatement2.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/commentOnArrayElement11.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/commentOnArrayElement12.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/elementAccessExpressionInternalComments.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/errorsInGenericTypeReference.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/implicitAnyAmbients.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/implicitAnyDeclareMemberWithoutType.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/implicitAnyFunctionOverloadWithImplicitAnyReturnType.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/narrowByClauseExpressionInSwitchTrue5.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/parenthesizedExpressionInternalComments.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/promiseChaining.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/promiseChaining1.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/propertyAccessExpressionInnerComments.ts
+
+Normal: tasks/coverage/typescript/tests/cases/compiler/tryStatementInternalComments.ts
+
+Normal: tasks/coverage/typescript/tests/cases/conformance/expressions/binaryOperators/comparisonOperator/comparisonOperatorWithTypeParameter.ts
+
+Normal: tasks/coverage/typescript/tests/cases/conformance/expressions/binaryOperators/logicalAndOperator/logicalAndOperatorWithTypeParameters.ts
+
+Normal: tasks/coverage/typescript/tests/cases/conformance/expressions/binaryOperators/logicalOrOperator/logicalOrOperatorWithTypeParameters.ts
+
+Normal: tasks/coverage/typescript/tests/cases/conformance/generators/yieldStatementNoAsiAfterTransform.ts
+
+Normal: tasks/coverage/typescript/tests/cases/conformance/jsx/tsxSpreadAttributesResolution14.tsx
+
+Normal: tasks/coverage/typescript/tests/cases/conformance/jsx/tsxSpreadAttributesResolution16.tsx
+
+Normal: tasks/coverage/typescript/tests/cases/conformance/parser/ecmascript5/IndexSignatures/parserIndexSignature4.ts
+
+Normal: tasks/coverage/typescript/tests/cases/conformance/parser/ecmascript5/IndexSignatures/parserIndexSignature5.ts
+
+Normal: tasks/coverage/typescript/tests/cases/conformance/statements/returnStatements/returnStatementNoAsiAfterTransform.ts
+
+Normal: tasks/coverage/typescript/tests/cases/conformance/types/intersection/intersectionNarrowing.ts
+
+Normal: tasks/coverage/typescript/tests/cases/conformance/types/typeRelationships/typeAndMemberIdentity/typeParametersAreIdenticalToThemselves.ts
+

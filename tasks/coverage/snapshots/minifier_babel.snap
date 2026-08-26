@@ -2,4 +2,28 @@ commit: 1eac4481
 
 minifier_babel Summary:
 AST Parsed     : 1785/1785 (100.00%)
-Positive Passed: 1785/1785 (100.00%)
+Positive Passed: 1773/1785 (99.33%)
+Compress: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/async-call-expression/input.js
+
+Compress: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/call-expression-no-argument/input.js
+
+Compress: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/directive/input.js
+
+Compress: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/new-expression-no-argument/input.js
+
+Compress: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/sequence-expression/input.js
+
+Compress: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/switch-case/input.js
+
+Compress: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/switch-no-case-comment/input.js
+
+Compress: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/basic/try-statement/input.js
+
+Compress: tasks/coverage/babel/packages/babel-parser/test/fixtures/comments/decorators/decorators-before-export/input.js
+
+Compress: tasks/coverage/babel/packages/babel-parser/test/fixtures/core/opts/allowYieldOutsideFunction-true-2/input.js
+
+Compress: tasks/coverage/babel/packages/babel-parser/test/fixtures/core/uncategorised/308/input.js
+
+Compress: tasks/coverage/babel/packages/babel-parser/test/fixtures/esprima/automatic-semicolon-insertion/migrated_0008/input.js
+
