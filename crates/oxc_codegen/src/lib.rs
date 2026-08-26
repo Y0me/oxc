@@ -624,6 +624,7 @@ impl<'a> Codegen<'a> {
                 self.print_comments_before_closing_delimiter(close);
                 self.dedent();
                 if self.last_byte() != Some(b'\n') {
+                    self.trim_trailing_indent_space();
                     self.print_hard_newline();
                 }
             }
@@ -646,10 +647,18 @@ impl<'a> Codegen<'a> {
     }
 
     fn print_block_end(&mut self, span: Span) {
+        self.trim_trailing_indent_space();
         self.dedent();
         self.print_indent();
         self.add_source_mapping_end(span);
         self.print_ascii_byte(b'}');
+    }
+
+    #[inline]
+    fn trim_trailing_indent_space(&mut self) {
+        while matches!(self.last_byte(), Some(b' ' | b'\t')) {
+            self.code.pop_byte();
+        }
     }
 
     fn print_body(&mut self, stmt: &Statement<'_>, ctx: Context) {
@@ -917,8 +926,10 @@ impl<'a> Codegen<'a> {
             decorator.print(self, ctx);
             // Only separate from the following token when the decorator ends in an
             // identifier char (`@dec class`); `@dec() class` can be `@dec()class`.
-            self.print_soft_space();
-            self.print_space_before_identifier();
+            if self.last_byte() != Some(b'\n') {
+                self.print_soft_space();
+                self.print_space_before_identifier();
+            }
         }
     }
 

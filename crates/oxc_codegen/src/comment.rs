@@ -43,9 +43,8 @@ impl CommentStore {
         };
         for comment in comments.drain(..) {
             if groups.last().is_none_or(|group| group.anchor != comment.attached_to) {
-                for bit in Self::anchor_filter_bits(comment.attached_to) {
-                    anchor_bits[bit / 64] |= 1_u64 << (bit % 64);
-                }
+                let bit = Self::anchor_filter_bit(comment.attached_to);
+                anchor_bits[bit / 64] |= 1_u64 << (bit % 64);
                 groups.push(CommentGroup {
                     anchor: comment.attached_to,
                     leading: CommentList::new(),
@@ -80,9 +79,8 @@ impl CommentStore {
         if self.remaining == 0 {
             return false;
         }
-        Self::anchor_filter_bits(anchor)
-            .into_iter()
-            .all(|bit| self.anchor_bits[bit / 64] & (1_u64 << (bit % 64)) != 0)
+        let bit = Self::anchor_filter_bit(anchor);
+        self.anchor_bits[bit / 64] & (1_u64 << (bit % 64)) != 0
     }
 
     #[inline]
@@ -94,11 +92,8 @@ impl CommentStore {
     }
 
     #[inline]
-    fn anchor_filter_bits(anchor: u32) -> [usize; 2] {
-        let first = anchor as usize & Self::ANCHOR_FILTER_MASK;
-        let mixed = anchor.wrapping_mul(0x9E37_79B1);
-        let second = (mixed ^ (mixed >> 16)) as usize & Self::ANCHOR_FILTER_MASK;
-        [first, second]
+    fn anchor_filter_bit(anchor: u32) -> usize {
+        anchor as usize & Self::ANCHOR_FILTER_MASK
     }
 
     fn has_non_semantic_at(&self, anchor: u32) -> bool {
@@ -212,6 +207,24 @@ impl CommentStore {
         self.groups[first..last]
             .iter()
             .any(|group| !group.leading.is_empty() || !group.trailing.is_empty())
+    }
+
+    fn first_between(
+        &self,
+        start: u32,
+        end: u32,
+        predicate: impl Fn(&Comment) -> bool,
+    ) -> Option<Comment> {
+        if start >= end {
+            return None;
+        }
+        let (first, last) = self.bounds(start.saturating_add(1), end, false);
+        self.groups[first..last]
+            .iter()
+            .flat_map(|group| group.leading.iter().chain(&group.trailing))
+            .filter(|comment| predicate(comment))
+            .min_by_key(|comment| comment.span.start)
+            .copied()
     }
 
     fn take_between(
@@ -342,6 +355,11 @@ impl AnnotationKind {
 }
 
 impl Codegen<'_> {
+    #[inline]
+    pub(crate) fn has_pending_comments(&self) -> bool {
+        self.comments.remaining != 0
+    }
+
     pub(crate) fn build_comments(&mut self, comments: &[Comment]) {
         if self.options.comments == CommentOptions::disabled() {
             return;
@@ -485,21 +503,29 @@ impl Codegen<'_> {
     #[cold]
     #[inline(never)]
     fn print_attached_comments_at_slow(&mut self, start: u32) {
-        if self.has_attached_comments_at(start) {
-            let comments = self.comments.take_matching_leading_at(start, |comment| {
-                (!self.suppress_normal_comments && comment.is_normal())
-                    || comment.is_jsdoc()
-                    || (comment.is_annotation()
-                        && comment.content != CommentContent::PureNotApplied
-                        && !comment.is_pure()
-                        && !comment.is_no_side_effects()
-                        && !comment.is_property_key_annotation())
-            });
+        let comments = self.take_attached_comments_at(start);
+        if !comments.is_empty() {
             self.print_comments(&comments);
             if self.last_byte() != Some(b'\n') {
                 self.consume_pending_indent_space();
             }
         }
+    }
+
+    fn take_attached_comments_at(&mut self, start: u32) -> CommentList {
+        if !self.has_attached_comments_at(start) {
+            return CommentList::new();
+        }
+        let suppress_normal_comments = self.suppress_normal_comments;
+        self.comments.take_matching_leading_at(start, |comment| {
+            (!suppress_normal_comments && comment.is_normal())
+                || comment.is_jsdoc()
+                || (comment.is_annotation()
+                    && comment.content != CommentContent::PureNotApplied
+                    && !comment.is_pure()
+                    && !comment.is_no_side_effects()
+                    && !comment.is_property_key_annotation())
+        })
     }
 
     #[inline]
@@ -523,8 +549,38 @@ impl Codegen<'_> {
             })
         });
         if should_print {
+            // Statement printers commonly emit their terminating newline
+            // before the generic `Gen::print` trailing hook runs. Move that
+            // newline behind the trailing comment so `x; // comment` does not
+            // become a leading comment for the next statement on pass two.
+            let removed_newline = self.last_byte() == Some(b'\n');
+            if removed_newline {
+                self.code.pop_byte();
+            }
+            let needs_space = self.comments.trailing_at(end).is_some_and(|comments| {
+                comments
+                    .iter()
+                    .find(|comment| !is_html_comment(**comment, source_text))
+                    .is_some_and(|comment| {
+                        source_text.is_none_or(|source_text| {
+                            let Ok(start) = usize::try_from(end) else { return true };
+                            let Ok(comment_start) = usize::try_from(comment.span.start) else {
+                                return true;
+                            };
+                            source_text.get(start..comment_start).is_none_or(|gap| {
+                                gap.bytes().any(|byte| byte.is_ascii_whitespace())
+                            })
+                        })
+                    })
+            });
             if self.last_byte() != Some(b'\n') {
-                self.print_soft_space();
+                if needs_space {
+                    if !self.consume_pending_indent_space() {
+                        self.print_soft_space();
+                    }
+                } else {
+                    self.clear_pending_indent_space();
+                }
             }
             let has_html = self.comments.trailing_at(end).is_some_and(|comments| {
                 comments.iter().any(|comment| is_html_comment(*comment, source_text))
@@ -538,6 +594,9 @@ impl Codegen<'_> {
             };
             self.print_comments(&comments);
             self.clear_pending_indent_space();
+            if removed_newline && self.last_byte() != Some(b'\n') {
+                self.print_hard_newline();
+            }
         }
     }
 
@@ -549,12 +608,84 @@ impl Codegen<'_> {
             return;
         }
         let start = expression.span().start;
-        if self.has_attached_comments_at(start) {
-            self.print_leading_comments_anchored_to_self(start);
+        let comments = self.take_attached_comments_at(start);
+        if !comments.is_empty() {
+            self.print_comments(&comments);
+            if self.last_byte() == Some(b'\n') {
+                self.print_indent();
+            }
         }
         if let Expression::ParenthesizedExpression(paren) = expression {
             self.print_attached_comments_before_expression(&paren.expression);
         }
+    }
+
+    /// Parentheses around a return/yield/arrow operand cannot be discarded when
+    /// printing its leading comments would put the operand on the next line.
+    /// Without them, ASI changes the parse on the following codegen pass.
+    pub(crate) fn leading_comments_cause_newline_before_expression(
+        &self,
+        expression: &Expression<'_>,
+    ) -> bool {
+        if self.comments.remaining == 0 || is_pife_function(expression) {
+            return false;
+        }
+        let start = expression.span().start;
+        let causes_newline = self.comments.leading_at(start).is_some_and(|comments| {
+            comments.iter().any(|comment| {
+                let printable = (!self.suppress_normal_comments && comment.is_normal())
+                    || comment.is_jsdoc()
+                    || (comment.is_annotation()
+                        && comment.content != CommentContent::PureNotApplied
+                        && !comment.is_pure()
+                        && !comment.is_no_side_effects()
+                        && !comment.is_property_key_annotation());
+                printable && (comment.is_line() || comment.preceded_by_newline())
+            })
+        });
+        causes_newline
+            || match expression {
+                Expression::ParenthesizedExpression(expression) => {
+                    self.leading_comments_cause_newline_before_expression(&expression.expression)
+                }
+                Expression::TSAsExpression(expression) => {
+                    self.leading_comments_cause_newline_before_expression(&expression.expression)
+                }
+                Expression::TSSatisfiesExpression(expression) => {
+                    self.leading_comments_cause_newline_before_expression(&expression.expression)
+                }
+                Expression::TSTypeAssertion(expression) => {
+                    self.leading_comments_cause_newline_before_expression(&expression.expression)
+                }
+                Expression::TSNonNullExpression(expression) => {
+                    self.leading_comments_cause_newline_before_expression(&expression.expression)
+                }
+                Expression::TSInstantiationExpression(expression) => {
+                    self.leading_comments_cause_newline_before_expression(&expression.expression)
+                }
+                Expression::BinaryExpression(expression) => {
+                    self.leading_comments_cause_newline_before_expression(&expression.left)
+                }
+                Expression::LogicalExpression(expression) => {
+                    self.leading_comments_cause_newline_before_expression(&expression.left)
+                }
+                Expression::ConditionalExpression(expression) => {
+                    self.leading_comments_cause_newline_before_expression(&expression.test)
+                }
+                Expression::StaticMemberExpression(expression) => {
+                    self.leading_comments_cause_newline_before_expression(&expression.object)
+                }
+                Expression::ComputedMemberExpression(expression) => {
+                    self.leading_comments_cause_newline_before_expression(&expression.object)
+                }
+                Expression::CallExpression(expression) => {
+                    self.leading_comments_cause_newline_before_expression(&expression.callee)
+                }
+                Expression::TaggedTemplateExpression(expression) => {
+                    self.leading_comments_cause_newline_before_expression(&expression.tag)
+                }
+                _ => false,
+            }
     }
 
     /// Print leading comments at `start` and glue the next token to them: after a
@@ -705,11 +836,38 @@ impl Codegen<'_> {
         self.comments.has_between(start, end)
     }
 
+    pub(crate) fn comments_in_range_need_space_after(&self, start: u32, end: u32) -> bool {
+        let Some(comment) = self.comments.first_between(start, end, |comment| {
+            !comment.is_pure() && !comment.is_no_side_effects()
+        }) else {
+            return false;
+        };
+        self.source_text.is_none_or(|source_text| {
+            let Ok(start) = usize::try_from(start) else { return true };
+            let Ok(comment_start) = usize::try_from(comment.span.start) else { return true };
+            source_text
+                .get(start..comment_start)
+                .is_none_or(|gap| gap.as_bytes().last().is_some_and(u8::is_ascii_whitespace))
+        })
+    }
+
     pub(crate) fn print_comments_before_closing_delimiter(&mut self, close: u32) -> bool {
         let Some(comments) = self.comments.take_leading_at(close) else { return false };
+        let needs_space = comments.last().is_some_and(|comment| {
+            self.source_text.is_some_and(|source_text| {
+                let Ok(comment_end) = usize::try_from(comment.span.end) else { return false };
+                let Ok(close) = usize::try_from(close) else { return false };
+                source_text
+                    .get(comment_end..close)
+                    .and_then(|gap| gap.as_bytes().last())
+                    .is_some_and(u8::is_ascii_whitespace)
+            })
+        });
         self.print_comments(&comments);
-        if self.last_byte() != Some(b'\n') {
+        if needs_space && self.last_byte() != Some(b'\n') {
             self.consume_pending_indent_space();
+        } else {
+            self.clear_pending_indent_space();
         }
         true
     }
@@ -722,6 +880,46 @@ impl Codegen<'_> {
         if !self.print_comments_in_range(start, end) {
             return false;
         }
+        if self.last_byte() == Some(b'\n') {
+            self.print_indent();
+        } else {
+            self.consume_pending_indent_space();
+        }
+        true
+    }
+
+    pub(crate) fn print_leading_comments_in_range_anchored_to_next(
+        &mut self,
+        start: u32,
+        end: u32,
+    ) -> bool {
+        let comments = self.comments.take_between(start, end, |comment| {
+            comment.is_leading() && !comment.is_pure() && !comment.is_no_side_effects()
+        });
+        if comments.is_empty() {
+            return false;
+        }
+        self.print_comments(&comments);
+        if self.last_byte() == Some(b'\n') {
+            self.print_indent();
+        } else {
+            self.consume_pending_indent_space();
+        }
+        true
+    }
+
+    pub(crate) fn print_trailing_comments_in_range_anchored_to_next(
+        &mut self,
+        start: u32,
+        end: u32,
+    ) -> bool {
+        let comments = self.comments.take_between(start, end, |comment| {
+            comment.is_trailing() && !comment.is_pure() && !comment.is_no_side_effects()
+        });
+        if comments.is_empty() {
+            return false;
+        }
+        self.print_comments(&comments);
         if self.last_byte() == Some(b'\n') {
             self.print_indent();
         } else {
