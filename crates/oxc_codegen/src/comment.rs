@@ -52,16 +52,14 @@ impl CommentStore {
         self.groups.binary_search_by_key(&anchor, |group| group.anchor)
     }
 
-    #[inline]
-    fn is_empty(&self) -> bool {
-        self.groups.iter().all(|group| group.leading.is_empty() && group.trailing.is_empty())
-    }
-
-    #[inline]
-    fn has_at(&self, anchor: u32) -> bool {
+    fn has_non_semantic_at(&self, anchor: u32) -> bool {
         self.index(anchor).is_ok_and(|index| {
             let group = &self.groups[index];
-            !group.leading.is_empty() || !group.trailing.is_empty()
+            group
+                .leading
+                .iter()
+                .chain(&group.trailing)
+                .any(|comment| !comment.is_pure() && !comment.is_no_side_effects())
         })
     }
 
@@ -89,19 +87,6 @@ impl CommentStore {
             .then(|| std::mem::take(&mut self.groups[index].trailing))
     }
 
-    fn take_all_at(&mut self, anchor: u32) -> Option<CommentList> {
-        let index = self.index(anchor).ok()?;
-        let group = &mut self.groups[index];
-        let mut comments = std::mem::take(&mut group.leading);
-        comments.extend(std::mem::take(&mut group.trailing));
-        if comments.is_empty() {
-            None
-        } else {
-            comments.sort_unstable_by_key(|comment| comment.span.start);
-            Some(comments)
-        }
-    }
-
     fn take_matching_at(
         &mut self,
         anchor: u32,
@@ -122,6 +107,19 @@ impl CommentStore {
     ) -> CommentList {
         let Ok(index) = self.index(anchor) else { return CommentList::new() };
         take_matching(&mut self.groups[index].leading, predicate)
+    }
+
+    fn nearest_matching_leading_anchor(
+        &self,
+        anchor: u32,
+        predicate: impl Fn(&Comment) -> bool,
+    ) -> Option<u32> {
+        let end = self.groups.partition_point(|group| group.anchor <= anchor);
+        self.groups[..end]
+            .iter()
+            .rev()
+            .find(|group| group.leading.iter().any(&predicate))
+            .map(|group| group.anchor)
     }
 
     fn take_matching_trailing_at(
@@ -197,9 +195,9 @@ impl CommentStore {
 
     fn has_matching_before(&self, end: u32, predicate: impl Fn(&Comment) -> bool) -> bool {
         let last = self.groups.partition_point(|group| group.anchor < end);
-        self.groups[..last].iter().any(|group| {
-            group.leading.iter().chain(&group.trailing).any(&predicate)
-        })
+        self.groups[..last]
+            .iter()
+            .any(|group| group.leading.iter().chain(&group.trailing).any(&predicate))
     }
 
     fn take_matching_before(
@@ -218,10 +216,7 @@ impl CommentStore {
     }
 }
 
-fn take_matching(
-    comments: &mut CommentList,
-    predicate: impl Fn(&Comment) -> bool,
-) -> CommentList {
+fn take_matching(comments: &mut CommentList, predicate: impl Fn(&Comment) -> bool) -> CommentList {
     let mut taken = CommentList::new();
     comments.retain(|comment| {
         if predicate(comment) {
@@ -335,7 +330,7 @@ impl Codegen<'_> {
     }
 
     pub(crate) fn has_comment(&self, start: u32) -> bool {
-        self.comments.has_at(start)
+        self.comments.has_non_semantic_at(start)
     }
 
     /// Emit a pure / no-side-effects annotation comment for the AST node at
@@ -362,13 +357,22 @@ impl Codegen<'_> {
         kind: AnnotationKind,
         newline_after: bool,
     ) {
-        let has_compatible_annotation = self.comments.leading_at(start).is_some_and(|comments| {
-            comments.iter().any(|comment| kind.matches(comment))
-                && (newline_after
-                    || comments.iter().filter(|comment| kind.matches(comment)).all(|comment| !comment.is_line()))
+        let source_anchor = self.comments.nearest_matching_leading_anchor(start, |comment| {
+            kind.matches(comment) && (newline_after || !comment.is_line())
         });
-        if self.source_text.is_some() && has_compatible_annotation {
-            let comments = self.comments.take_matching_leading_at(start, |comment| kind.matches(comment));
+        if self.source_text.is_some()
+            && let Some(source_anchor) = source_anchor
+        {
+            let mut comments = self.comments.take_matching_leading_at(source_anchor, |comment| {
+                kind.matches(comment) && (newline_after || !comment.is_line())
+            });
+            // The semantic claim above remains kind-specific. Once its source
+            // anchor is owned, retain compatible sibling comments at that
+            // exact boundary instead of relocating them to statement fallback.
+            comments.extend(self.comments.take_matching_leading_at(source_anchor, |comment| {
+                newline_after || !comment.is_line()
+            }));
+            comments.sort_unstable_by_key(|comment| comment.span.start);
             for (index, comment) in comments.iter().enumerate() {
                 if index != 0 {
                     self.print_str(" ");
@@ -392,9 +396,6 @@ impl Codegen<'_> {
     }
 
     pub(crate) fn get_comments(&mut self, start: u32) -> Option<CommentList> {
-        if self.comments.is_empty() {
-            return None;
-        }
         let comments = self
             .comments
             .take_matching_at(start, |comment| !comment.is_pure() && !comment.is_no_side_effects());
@@ -451,7 +452,8 @@ impl Codegen<'_> {
             .leading_at(start)
             .is_some_and(|comments| comments.iter().any(|comment| comment.is_normal()));
         if should_print {
-            let comments = self.comments.take_matching_leading_at(start, |comment| comment.is_normal());
+            let comments =
+                self.comments.take_matching_leading_at(start, |comment| comment.is_normal());
             self.print_comments(&comments);
             if self.last_byte() != Some(b'\n') {
                 self.consume_pending_indent_space();
@@ -485,10 +487,9 @@ impl Codegen<'_> {
         });
         if should_print {
             self.print_soft_space();
-            let has_html = self
-                .comments
-                .trailing_at(end)
-                .is_some_and(|comments| comments.iter().any(|comment| is_html_comment(*comment, source_text)));
+            let has_html = self.comments.trailing_at(end).is_some_and(|comments| {
+                comments.iter().any(|comment| is_html_comment(*comment, source_text))
+            });
             let comments = if has_html {
                 self.comments.take_matching_trailing_at(end, |comment| {
                     !is_html_comment(*comment, source_text)
@@ -505,10 +506,7 @@ impl Codegen<'_> {
         &mut self,
         expression: &Expression<'_>,
     ) {
-        if self.comments.is_empty()
-            || is_pife_function(expression)
-            || matches!(expression, Expression::ObjectExpression(_))
-        {
+        if is_pife_function(expression) || matches!(expression, Expression::ObjectExpression(_)) {
             return;
         }
         let start = expression.span().start;
@@ -557,10 +555,21 @@ impl Codegen<'_> {
     /// comment at the `(`, `a || (/* c */ x)` at `x` — an operand printer only
     /// sees one node, so the walk happens here for every emission site.
     pub(crate) fn print_leading_comments_before_expression(&mut self, expression: &Expression<'_>) {
-        if self.comments.is_empty() || is_pife_function(expression) {
+        if is_pife_function(expression) {
             return;
         }
-        self.print_leading_comments_anchored_to_self(expression.span().start);
+        let start = expression.span().start;
+        let comments = self.comments.take_matching_leading_at(start, |comment| {
+            !comment.is_pure() && !comment.is_no_side_effects()
+        });
+        if !comments.is_empty() {
+            self.print_comments(&comments);
+            if self.last_byte() == Some(b'\n') {
+                self.print_indent();
+            } else {
+                self.consume_pending_indent_space();
+            }
+        }
         if let Expression::ParenthesizedExpression(paren) = expression {
             self.print_leading_comments_before_expression(&paren.expression);
         }
@@ -584,7 +593,7 @@ impl Codegen<'_> {
         &mut self,
         expression: &Expression<'_>,
     ) {
-        if self.comments.is_empty() || is_pife_function(expression) {
+        if is_pife_function(expression) {
             return;
         }
         let start = expression.span().start;
@@ -628,9 +637,8 @@ impl Codegen<'_> {
     /// upstream pass.
     #[inline]
     pub(crate) fn print_orphan_comments_before(&mut self, end: u32) {
-        let mut orphans = self
-            .comments
-            .take_matching_before(end, |comment| preserve_when_orphaned(*comment));
+        let mut orphans =
+            self.comments.take_matching_before(end, |comment| preserve_when_orphaned(*comment));
         if let Some(last) = orphans.last_mut() {
             // Orphans aren't in their original position, so the source's
             // `followed_by_newline` hint no longer applies. Force it on so
@@ -668,7 +676,9 @@ impl Codegen<'_> {
         if comments.is_empty() {
             return;
         }
-        if comments.first().is_some_and(|comment| !comment.preceded_by_newline()) {
+        if self.last_byte() != Some(b'\n')
+            && comments.first().is_some_and(|comment| !comment.preceded_by_newline())
+        {
             self.print_soft_space();
         }
         comments.last_mut().unwrap().set_followed_by_newline(true);
@@ -680,7 +690,9 @@ impl Codegen<'_> {
         if comments.is_empty() {
             return;
         }
-        if comments.first().is_some_and(|comment| !comment.preceded_by_newline()) {
+        if self.last_byte() != Some(b'\n')
+            && comments.first().is_some_and(|comment| !comment.preceded_by_newline())
+        {
             self.print_soft_space();
         }
         comments.last_mut().unwrap().set_followed_by_newline(true);
@@ -688,10 +700,12 @@ impl Codegen<'_> {
     }
 
     pub(crate) fn print_expr_comments(&mut self, start: u32) -> bool {
-        if self.comments.is_empty() {
+        let comments = self
+            .comments
+            .take_matching_at(start, |comment| !comment.is_pure() && !comment.is_no_side_effects());
+        if comments.is_empty() {
             return false;
         }
-        let Some(comments) = self.comments.take_all_at(start) else { return false };
 
         for comment in &comments {
             self.print_hard_newline();

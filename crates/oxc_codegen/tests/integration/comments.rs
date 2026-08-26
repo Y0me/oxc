@@ -1,7 +1,8 @@
 use oxc_allocator::Allocator;
+use oxc_ast::CommentPosition;
 use oxc_codegen::Codegen;
 use oxc_parser::Parser;
-use oxc_span::SourceType;
+use oxc_span::{GetSpan, SourceType};
 
 use crate::{
     codegen, codegen_options, test_idempotency, test_idempotency_options,
@@ -28,12 +29,115 @@ fn comments_are_not_lost() {
         let printed = codegen_ret.code;
         for comment in ret.program.comments {
             let expected_comment_content = comment.content_span().source_text(original_source_text);
-            assert!(
-                printed.contains(expected_comment_content),
-                "expected comment content `{expected_comment_content}` to exist in printed: `{printed}`, original: `{original_source_text}`"
+            assert_eq!(
+                printed.matches(expected_comment_content).count(),
+                1,
+                "expected comment content `{expected_comment_content}` exactly once in printed: `{printed}`, original: `{original_source_text}`"
             )
         }
     }
+}
+
+#[test]
+fn comments_are_claimed_exactly_once_across_boundaries_and_fallbacks() {
+    const TORTURE: &str =
+        "/* c0 */async/* c1 */ function/* c2 */* /* c3 */foo3/* c4 */() /* c5 */ {}";
+    let printed = codegen(TORTURE);
+    for marker in ["c0", "c1", "c2", "c3", "c4", "c5"] {
+        assert_eq!(printed.matches(marker).count(), 1, "{marker}: {printed}");
+    }
+    test_idempotency(TORTURE);
+
+    let non_generator = codegen("/* ng0 */async/* ng1 */ function/* ng2 */ foo() {}");
+    for marker in ["ng0", "ng1", "ng2"] {
+        assert_eq!(non_generator.matches(marker).count(), 1, "{marker}: {non_generator}");
+    }
+
+    let repeated = codegen("/* same-anchor-a */ /* same-anchor-b */ const value = 1;");
+    for marker in ["same-anchor-a", "same-anchor-b"] {
+        assert_eq!(repeated.matches(marker).count(), 1, "{marker}: {repeated}");
+    }
+
+    let empty = codegen(
+        "const array = [/* empty-array */]; const object = {/* empty-object */}; function f(/* empty-params */) {}",
+    );
+    for marker in ["empty-array", "empty-object", "empty-params"] {
+        assert_eq!(empty.matches(marker).count(), 1, "{marker}: {empty}");
+    }
+}
+
+#[test]
+fn semantic_annotations_are_printed_exactly_once() {
+    for (source, marker) in [
+        ("/* @__PURE__ */ (factory());", "PURE"),
+        ("const obj = { props: /*#__PURE__*/ extend({}, validators) };", "PURE"),
+        ("const symbols = new Set(/*#__PURE__*/ Object.getOwnPropertyNames(Symbol));", "PURE"),
+        ("/* @__NO_SIDE_EFFECTS__ */ (function factory() {});", "NO_SIDE_EFFECTS"),
+    ] {
+        let printed = codegen(source);
+        assert_eq!(printed.matches(marker).count(), 1, "{source} -> {printed}");
+    }
+}
+
+#[test]
+fn comments_are_claimed_without_global_source_order() {
+    let allocator = Allocator::default();
+    let source = "/* reorder-a */ first(); /* reorder-b */ second();";
+    let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
+    assert!(ret.diagnostics.is_empty());
+    let mut program = ret.program;
+    program.body.swap(0, 1);
+    let printed = Codegen::new().build(&program).code;
+    for marker in ["reorder-a", "reorder-b"] {
+        assert_eq!(printed.matches(marker).count(), 1, "{marker}: {printed}");
+    }
+
+    let source = "/* @__PURE__ reorder-pure-a */ first(); /* #__PURE__ reorder-pure-b */ second();";
+    let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
+    assert!(ret.diagnostics.is_empty());
+    let mut program = ret.program;
+    program.body.swap(0, 1);
+    let printed = Codegen::new().build(&program).code;
+    for marker in ["reorder-pure-a", "reorder-pure-b"] {
+        assert_eq!(printed.matches(marker).count(), 1, "{marker}: {printed}");
+    }
+}
+
+#[test]
+fn mixed_leading_and_trailing_comments_share_an_anchor() {
+    let allocator = Allocator::default();
+    let source = "/* mixed-trailing */ first(); /* mixed-leading */ second();";
+    let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
+    assert!(ret.diagnostics.is_empty());
+    let mut program = ret.program;
+    let anchor = program.body[1].span().start;
+    program.comments[0].attached_to = anchor;
+    program.comments[0].position = CommentPosition::Trailing;
+    program.comments[1].attached_to = anchor;
+    program.comments[1].position = CommentPosition::Leading;
+    let printed = Codegen::new().build(&program).code;
+    for marker in ["mixed-trailing", "mixed-leading"] {
+        assert_eq!(printed.matches(marker).count(), 1, "{marker}: {printed}");
+    }
+}
+
+#[test]
+fn removed_node_and_comments_disabled_fallbacks() {
+    use oxc_codegen::CodegenOptions;
+
+    let allocator = Allocator::default();
+    let source = "/* removed */ removed(); survivor();";
+    let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
+    assert!(ret.diagnostics.is_empty());
+    let mut program = ret.program;
+    program.body.remove(0);
+    let printed = Codegen::new().build(&program).code;
+    assert_eq!(printed.matches("removed").count(), 1, "{printed}");
+
+    let ret = Parser::new(&allocator, "/* disabled */ enabled();", SourceType::ts()).parse();
+    assert!(ret.diagnostics.is_empty());
+    let printed = Codegen::new().with_options(CodegenOptions::minify()).build(&ret.program).code;
+    assert_eq!(printed.matches("disabled").count(), 0, "{printed}");
 }
 
 #[test]
@@ -236,20 +340,18 @@ fn test_parser_attached_comments_survive_special_paths() {
 }
 
 #[test]
-fn test_cjs_fast_paths_deliberately_skip_attached_comments_when_minified() {
+fn test_cjs_fast_paths_preserve_shape_and_fallback_comments_when_minified() {
     use oxc_codegen::CodegenOptions;
 
     let options = CodegenOptions { minify: true, ..CodegenOptions::default() };
-    for (source, marker) in [
-        ("require(/* v8 require */ \"module\");", "v8 require"),
-        ("exports[/* v8 exports */ \"name\"] = value;", "v8 exports"),
-        ("key === /* v8 equality */ \"default\";", "v8 equality"),
+    for (source, marker, shape) in [
+        ("require(/* v8 require */ \"module\");", "v8 require", "require(\"module\")"),
+        ("exports[/* v8 exports */ \"name\"] = value;", "v8 exports", "exports[\"name\"]"),
+        ("key === /* v8 equality */ \"default\";", "v8 equality", "key===\"default\""),
     ] {
         let generated = codegen_options(source, &options).code;
-        assert!(
-            !generated.contains(marker),
-            "comment inside the cjs-module-lexer shape was retained: {source} -> {generated}"
-        );
+        assert!(generated.contains(shape), "cjs-module-lexer shape changed: {generated}");
+        assert_eq!(generated.matches(marker).count(), 1, "{source} -> {generated}");
     }
 }
 
@@ -448,11 +550,15 @@ fn test_minify_comment_glue_idempotency() {
 // `if(a||(b,..))x`), which can anchor a removed statement's banner comments at
 // the RHS span start; printing them mid-expression breaks minify idempotency
 // (minifier_test262 `language/asi/S7.9_A5.8_T1.js`). Only annotation-bearing
-// groups (coverage directives etc.) are printed.
+// groups (coverage directives etc.) are printed. The normal comments are
+// recovered after the enclosing statement reaches a safe terminator.
 #[test]
 fn test_normal_comment_before_logical_rhs_not_printed() {
-    test("const value = a ?? /* plain comment */ [];", "const value = a ?? [];\n");
-    test("const value = a || //\n////////\n(b, c);", "const value = a || (b, c);\n");
+    test(
+        "const value = a ?? /* plain comment */ [];",
+        "const value = a ?? [];\n/* plain comment */\n",
+    );
+    test("const value = a || //\n////////\n(b, c);", "const value = a || (b, c);\n//\n////////\n");
 }
 
 #[test]
@@ -728,7 +834,7 @@ pub mod coverage {
     }
 
     #[test]
-    fn do_not_preserve_non_file_coverage_comment_when_anchor_is_removed() {
+    fn preserve_non_file_coverage_comment_when_anchor_is_removed() {
         for comment in [
             "/* v8 ignore next */",
             "/* v8 ignore filename */",
@@ -737,7 +843,10 @@ pub mod coverage {
             "/* node:coverage disable */",
         ] {
             let source_text = format!("{comment}\nconst removed = 1;\nsurvivor();");
-            assert_eq!(codegen_after_removing_first_statement(&source_text), "survivor();\n");
+            assert_eq!(
+                codegen_after_removing_first_statement(&source_text),
+                format!("survivor();\n{comment}\n")
+            );
         }
     }
 

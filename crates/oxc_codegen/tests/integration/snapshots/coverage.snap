@@ -109,6 +109,7 @@ try {
 } 
 /* istanbul ignore next */
 catch (e) {}
+// should never happen
 
 ########## 20
 try { console.log('test'); }
@@ -140,6 +141,7 @@ try {
 } catch (err) {
 	handle(err);
 }
+// v8 ignore next
 
 ########## 23
 const a = Math.random() ? 1 : /* istanbul ignore next */ 2;
