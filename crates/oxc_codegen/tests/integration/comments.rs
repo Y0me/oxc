@@ -1,7 +1,8 @@
 use oxc_allocator::Allocator;
-use oxc_ast::CommentPosition;
+use oxc_ast::{AttachedCommentPosition, CommentPosition};
 use oxc_codegen::Codegen;
 use oxc_parser::Parser;
+use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType};
 
 use crate::{
@@ -36,6 +37,63 @@ fn comments_are_not_lost() {
             );
         }
     }
+}
+
+#[test]
+fn semantic_comment_hosts_are_rebound_and_printed_once() {
+    for source in [
+        "/* c0 */async/* c1 */ function/* c2 */* /* c3 */foo/* c4 */() /* c5 */ {}",
+        "const foo /* #__PURE__ */ = pureOperation();",
+        "const values = [/* inside */]; class C {/* class-inside */}",
+        "test(function() {\n  var a = 1;\n  // one\n}\n// two\n);",
+        "(/* 1 */ { /* 2 */ f /* 3 */ (/* 4 */ a /* 5 */, /* 6 */) /* 7 */ { /* 8 */ } /* 9 */ } /* 10 */);",
+        "function commentedParameters(\na /* parameter a */,\nb /* parameter b */,\n/* extra comment */\n) {}",
+    ] {
+        let allocator = Allocator::default();
+        let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
+        assert!(ret.diagnostics.is_empty());
+        SemanticBuilder::new().with_build_nodes(true).build(&ret.program);
+        let attachments = ret.program.comment_attachments.0.as_deref().unwrap();
+        assert!(attachments.hosts.iter().all(|host| host.node_id.get().is_some()));
+
+        let printed = Codegen::new().build(&ret.program).code;
+        for comment in &ret.program.comments {
+            let marker = comment.content_span().source_text(source);
+            assert_eq!(printed.matches(marker).count(), 1, "{marker}: {printed}");
+        }
+
+        let allocator2 = Allocator::default();
+        let ret2 = Parser::new(&allocator2, &printed, SourceType::ts()).parse();
+        SemanticBuilder::new().with_build_nodes(true).build(&ret2.program);
+        let printed2 = Codegen::new().build(&ret2.program).code;
+        assert_eq!(printed2, printed, "semantic codegen is not idempotent for {source}");
+    }
+}
+
+#[test]
+fn post_parse_comment_attachment() {
+    let allocator = Allocator::default();
+    let source = "first(); /* after */\n/* before */ second(); const empty = [/* inside */];";
+    let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
+    assert!(ret.diagnostics.is_empty());
+    let attachments = ret.program.comment_attachments.0.as_deref().unwrap();
+
+    let position = |marker: &str| {
+        attachments
+            .comments
+            .iter()
+            .find(|attached| attached.comment.span.source_text(source).contains(marker))
+            .map(|attached| attached.position)
+            .unwrap()
+    };
+    assert_eq!(position("after"), AttachedCommentPosition::After);
+    assert_eq!(position("before"), AttachedCommentPosition::Before);
+    assert_eq!(position("inside"), AttachedCommentPosition::Inside);
+
+    let pure_source = "const foo /* #__PURE__ */ = pureOperation();";
+    let ret = Parser::new(&allocator, pure_source, SourceType::ts()).parse();
+    let attachments = ret.program.comment_attachments.0.as_deref().unwrap();
+    assert_eq!(attachments.comments[0].position, AttachedCommentPosition::After);
 }
 
 #[test]

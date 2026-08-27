@@ -92,6 +92,7 @@ use oxc_ast::{
     ast::{Expression, Program, Statement},
     builder::{AstBuilder, GetAstBuilder},
 };
+use oxc_ast_visit::comments::attach_comments;
 use oxc_diagnostics::Diagnostics;
 use oxc_span::{SourceType, Span};
 use oxc_syntax::module_record::ModuleRecord;
@@ -758,6 +759,10 @@ impl<'a, C: ParserConfig> ParserImpl<'a, C> {
             if panicked { ArenaVec::new_in(&self.ast) } else { self.lexer.finalize_tokens() };
 
         program.comments = self.lexer.trivia_builder.comments;
+        if !program.comments.is_empty() {
+            let attachments = attach_comments(self.ast.allocator(), &program);
+            program.comment_attachments.0 = Some(ArenaBox::new_in(attachments, &self.ast));
+        }
 
         ParserReturn {
             program,

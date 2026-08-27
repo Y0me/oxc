@@ -1,18 +1,188 @@
 use std::borrow::Cow;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use oxc_ast::{
-    Comment, CommentContent, CommentKind,
+    AstType, AttachedCommentPosition, Comment, CommentContent, CommentKind,
     ast::{Expression, Program},
 };
 use oxc_span::GetSpan;
-use oxc_syntax::line_terminator::LineTerminatorSplitter;
+use oxc_syntax::{line_terminator::LineTerminatorSplitter, node::NodeId};
 
 use crate::{Codegen, LegalComment, options::CommentOptions};
 
 type CommentList = SmallVec<[Comment; 1]>;
+
+#[derive(Default)]
+pub struct NodeCommentStore {
+    lookup: NodeCommentLookup,
+    owners: FxHashMap<u32, NodeId>,
+    exclusive: FxHashSet<u32>,
+    remaining: usize,
+}
+
+#[derive(Default)]
+enum NodeCommentLookup {
+    #[default]
+    Empty,
+    Inline(Vec<(NodeId, NodeComments)>),
+    Dense {
+        indices: Box<[u32]>,
+        comments: Vec<NodeComments>,
+    },
+}
+
+#[derive(Default)]
+pub struct NodeComments {
+    before: CommentList,
+    inside: CommentList,
+    after: CommentList,
+}
+
+impl NodeCommentStore {
+    fn build(program: &Program<'_>, mut retain: impl FnMut(Comment) -> bool) -> Option<Self> {
+        let attachments = program.comment_attachments.0.as_deref()?;
+        if attachments.hosts.iter().any(|host| host.node_id.get().is_none()) {
+            return None;
+        }
+
+        let mut hosts = Vec::new();
+        let mut owners = FxHashMap::default();
+        let mut exclusive = FxHashSet::default();
+        let mut remaining = 0;
+        for host in &attachments.hosts {
+            let node_id = host.node_id.get().unwrap();
+            let start = host.start as usize;
+            let end = start + host.len as usize;
+            if attachments.comments[start..end].iter().any(|attached| {
+                attached.comment.is_line() || attached.position == AttachedCommentPosition::Inside
+            }) {
+                continue;
+            }
+            let mut comments = NodeComments::default();
+            for attached in &attachments.comments[start..end] {
+                let comment = attached.comment;
+                let exact_leading = comment.is_leading() && comment.attached_to == host.span_start;
+                let owned_composite_gap = host.kind == AstType::FormalParameters
+                    || (host.kind == AstType::Function
+                        && matches!(
+                            host.parent_kind,
+                            Some(AstType::ObjectProperty | AstType::MethodDefinition)
+                        ));
+                let owned_position = match attached.position {
+                    AttachedCommentPosition::Before => exact_leading || owned_composite_gap,
+                    AttachedCommentPosition::After => {
+                        comment.is_block()
+                            && matches!(
+                                host.kind,
+                                AstType::FormalParameter | AstType::ObjectExpression
+                            )
+                    }
+                    AttachedCommentPosition::Inside => false,
+                };
+                if !owned_position || !retain(comment) {
+                    continue;
+                }
+                if !exact_leading || attached.position != AttachedCommentPosition::Before {
+                    exclusive.insert(comment.span.start);
+                }
+                match attached.position {
+                    AttachedCommentPosition::Before => comments.before.push(comment),
+                    AttachedCommentPosition::After => comments.after.push(comment),
+                    AttachedCommentPosition::Inside => comments.inside.push(comment),
+                }
+                owners.insert(comment.span.start, node_id);
+                remaining += 1;
+            }
+            if !comments.before.is_empty()
+                || !comments.inside.is_empty()
+                || !comments.after.is_empty()
+            {
+                hosts.push((node_id, comments));
+            }
+        }
+
+        let lookup = if hosts.is_empty() {
+            NodeCommentLookup::Empty
+        } else if hosts.len() <= 8 {
+            NodeCommentLookup::Inline(hosts)
+        } else {
+            let max_node_id = hosts.iter().map(|(node_id, _)| node_id.index()).max().unwrap();
+            let mut indices = vec![u32::MAX; max_node_id + 1].into_boxed_slice();
+            let mut comments = Vec::with_capacity(hosts.len());
+            for (node_id, node_comments) in hosts {
+                indices[node_id.index()] = u32::try_from(comments.len()).unwrap();
+                comments.push(node_comments);
+            }
+            NodeCommentLookup::Dense { indices, comments }
+        };
+        Some(Self { lookup, owners, exclusive, remaining })
+    }
+
+    fn take_all(&mut self, node_id: NodeId) -> Option<NodeComments> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let taken = match &mut self.lookup {
+            NodeCommentLookup::Empty => return None,
+            NodeCommentLookup::Inline(hosts) => {
+                let Some(index) = hosts.iter().position(|(id, _)| *id == node_id) else {
+                    return None;
+                };
+                hosts.swap_remove(index).1
+            }
+            NodeCommentLookup::Dense { indices, comments } => {
+                let Some(index) = indices.get_mut(node_id.index()) else {
+                    return None;
+                };
+                if *index == u32::MAX {
+                    return None;
+                }
+                let comment_index = *index as usize;
+                *index = u32::MAX;
+                std::mem::take(&mut comments[comment_index])
+            }
+        };
+        self.remaining -= taken.before.len() + taken.inside.len() + taken.after.len();
+        Some(taken)
+    }
+
+    fn remove_comments(&mut self, removed: &[Comment]) {
+        if removed.is_empty() || self.remaining == 0 {
+            return;
+        }
+        let remove_from = |node_comments: &mut NodeComments, comment: &Comment| {
+            let mut removed_count = 0;
+            for list in
+                [&mut node_comments.before, &mut node_comments.inside, &mut node_comments.after]
+            {
+                let before = list.len();
+                list.retain(|candidate| {
+                    candidate.span != comment.span || candidate.content != comment.content
+                });
+                removed_count += before - list.len();
+            }
+            removed_count
+        };
+        for comment in removed {
+            let Some(node_id) = self.owners.remove(&comment.span.start) else { continue };
+            let removed_count = match &mut self.lookup {
+                NodeCommentLookup::Empty => 0,
+                NodeCommentLookup::Inline(hosts) => hosts
+                    .iter_mut()
+                    .find(|(candidate, _)| *candidate == node_id)
+                    .map_or(0, |(_, comments)| remove_from(comments, comment)),
+                NodeCommentLookup::Dense { indices, comments } => indices
+                    .get(node_id.index())
+                    .copied()
+                    .filter(|index| *index != u32::MAX)
+                    .map_or(0, |index| remove_from(&mut comments[index as usize], comment)),
+            };
+            self.remaining -= removed_count;
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct CommentStore {
@@ -185,6 +355,23 @@ impl CommentStore {
         let comments = take_matching(&mut self.groups[index].trailing, predicate);
         self.remaining -= comments.len();
         comments
+    }
+
+    fn remove_comments(&mut self, removed: &[Comment]) {
+        if removed.is_empty() || self.remaining == 0 {
+            return;
+        }
+        for comment in removed {
+            let Some(index) = self.index(comment.attached_to) else { continue };
+            let group = &mut self.groups[index];
+            for list in [&mut group.leading, &mut group.trailing] {
+                let before = list.len();
+                list.retain(|candidate| {
+                    candidate.span != comment.span || candidate.content != comment.content
+                });
+                self.remaining -= before - list.len();
+            }
+        }
     }
 
     #[inline]
@@ -385,6 +572,87 @@ impl Codegen<'_> {
         self.comments = CommentStore::build(&mut retained);
     }
 
+    /// Build the fast NodeId-owned comment store when semantic analysis has
+    /// rebound every parser attachment host.
+    pub(crate) fn build_node_comments(&mut self, program: &Program<'_>) -> bool {
+        let Some(store) = NodeCommentStore::build(program, |comment| {
+            if comment.is_line()
+                || comment.is_pure()
+                || comment.is_no_side_effects()
+                || comment.is_property_key_annotation()
+            {
+                return false;
+            }
+            (comment.is_legal() && self.options.print_legal_comment())
+                || (comment.is_jsdoc() && self.options.print_jsdoc_comment())
+                || (comment.is_annotation() && self.options.print_annotation_comment())
+                || (comment.is_normal() && self.options.print_normal_comment())
+        }) else {
+            return false;
+        };
+        self.node_comments = store;
+        // Keep the source-offset store as the recovery owner for removed or
+        // replaced hosts. A successful node claim removes its matching copy.
+        let fallback_comments = program
+            .comments
+            .iter()
+            .copied()
+            .filter(|comment| !self.node_comments.exclusive.contains(&comment.span.start))
+            .collect::<Vec<_>>();
+        self.build_comments(&fallback_comments);
+        true
+    }
+
+    #[inline]
+    pub(crate) fn take_node_comments(&mut self, node_id: NodeId) -> Option<NodeComments> {
+        self.node_comments.take_all(node_id)
+    }
+
+    pub(crate) fn print_node_comments_before_id(&mut self, node_id: NodeId) {
+        let mut comments = self.take_node_comments(node_id);
+        self.print_node_comments_before(comments.as_mut());
+    }
+
+    #[inline]
+    pub(crate) fn print_node_comments_before(&mut self, node_comments: Option<&mut NodeComments>) {
+        let Some(node_comments) = node_comments else { return };
+        let mut comments = std::mem::take(&mut node_comments.before);
+        // Until a delimiter claims `inside` explicitly, printing it at the
+        // host's entry is the safe lossless fallback.
+        comments.extend(std::mem::take(&mut node_comments.inside));
+        if comments.is_empty() {
+            return;
+        }
+        comments.sort_unstable_by_key(|comment| comment.span.start);
+        self.comments.remove_comments(&comments);
+        self.print_comments_inner(&comments);
+        if self.last_byte() != Some(b'\n') {
+            self.consume_pending_indent_space();
+        }
+    }
+
+    #[inline]
+    pub(crate) fn print_node_comments_after(&mut self, node_comments: Option<&mut NodeComments>) {
+        let Some(node_comments) = node_comments else { return };
+        let comments = std::mem::take(&mut node_comments.after);
+        if comments.is_empty() {
+            return;
+        }
+        self.comments.remove_comments(&comments);
+        let removed_newline = self.last_byte() == Some(b'\n');
+        if removed_newline {
+            self.code.pop_byte();
+        }
+        if self.last_byte() != Some(b'\n') && !self.consume_pending_indent_space() {
+            self.print_soft_space();
+        }
+        self.print_comments_inner(&comments);
+        self.clear_pending_indent_space();
+        if removed_newline && self.last_byte() != Some(b'\n') {
+            self.print_hard_newline();
+        }
+    }
+
     pub(crate) fn has_comment(&self, start: u32) -> bool {
         self.comments.has_non_semantic_at(start)
     }
@@ -461,6 +729,7 @@ impl Codegen<'_> {
         let comments = self
             .comments
             .take_matching_at(start, |comment| !comment.is_pure() && !comment.is_no_side_effects());
+        self.node_comments.remove_comments(&comments);
         (!comments.is_empty()).then_some(comments)
     }
 
@@ -967,6 +1236,7 @@ impl Codegen<'_> {
         if comments.is_empty() {
             return false;
         }
+        self.node_comments.remove_comments(comments);
 
         for comment in comments {
             self.print_hard_newline();
@@ -983,6 +1253,11 @@ impl Codegen<'_> {
     }
 
     pub(crate) fn print_comments(&mut self, comments: &[Comment]) {
+        self.node_comments.remove_comments(comments);
+        self.print_comments_inner(comments);
+    }
+
+    fn print_comments_inner(&mut self, comments: &[Comment]) {
         let Some((first, rest)) = comments.split_first() else {
             return;
         };

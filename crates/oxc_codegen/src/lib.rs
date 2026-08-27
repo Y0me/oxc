@@ -34,7 +34,7 @@ mod sourcemap_builder;
 mod str;
 
 use binary_expr_visitor::BinaryExpressionVisitor;
-use comment::CommentStore;
+use comment::{CommentStore, NodeCommentStore};
 use operator::Operator;
 #[cfg(feature = "sourcemap")]
 use sourcemap_builder::SourcemapBuilder;
@@ -127,6 +127,7 @@ pub struct Codegen<'a> {
 
     // Builders
     comments: CommentStore,
+    node_comments: NodeCommentStore,
     has_property_key_annotations: bool,
 
     /// Suppress normal comments at a moved expression boundary. They remain
@@ -185,6 +186,7 @@ impl<'a> Codegen<'a> {
             indent: 0,
             quote: Quote::Double,
             comments: CommentStore::default(),
+            node_comments: NodeCommentStore::default(),
             has_property_key_annotations: false,
             suppress_normal_comments: false,
             #[cfg(feature = "sourcemap")]
@@ -246,7 +248,9 @@ impl<'a> Codegen<'a> {
         self.source_text = Some(program.source_text);
         self.indent = self.options.initial_indent;
         self.code.reserve(program.source_text.len());
-        self.build_comments(&program.comments);
+        if !self.build_node_comments(program) {
+            self.build_comments(&program.comments);
+        }
         #[cfg(feature = "sourcemap")]
         if let Some(path) = &self.options.source_map_path {
             self.sourcemap_builder = Some(SourcemapBuilder::new(path, program.source_text));

@@ -1,9 +1,15 @@
+use std::cell::Cell;
+
 use bitflags::bitflags;
 
-use oxc_allocator::{Allocator, CloneIn, CloneInSemanticIds};
+pub use oxc_allocator::Address;
+use oxc_allocator::{Allocator, Box, CloneIn, CloneInSemanticIds, Dummy, Vec};
 use oxc_ast_macros::ast;
 use oxc_estree::ESTree;
 use oxc_span::{ContentEq, GetSpan, Span};
+use oxc_syntax::node::NodeId;
+
+use crate::ast_kind::AstType;
 
 /// Indicates a line or block comment.
 #[ast]
@@ -188,6 +194,80 @@ pub struct Comment {
     /// Content of the comment
     #[estree(skip)]
     pub content: CommentContent,
+}
+
+/// Position of a source comment relative to its post-parse AST host.
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+pub enum AttachedCommentPosition {
+    /// Print before the host node.
+    #[default]
+    Before = 0,
+    /// Print after the host node.
+    After = 1,
+    /// Print inside a childless host's delimiters.
+    Inside = 2,
+}
+
+/// A source comment assigned to an AST host by the post-parse attachment pass.
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+pub struct AttachedComment {
+    pub comment: Comment,
+    pub position: AttachedCommentPosition,
+    pub same_line: bool,
+}
+
+/// A compact range of comments owned by one AST host.
+#[derive(Debug)]
+pub struct CommentAttachmentHost {
+    /// Address of the host in the freshly parsed AST.
+    pub address: Address,
+    /// Semantic identity assigned before transforms mutate the AST.
+    pub node_id: Cell<Option<NodeId>>,
+    /// Concrete AST node kind of this host.
+    pub kind: AstType,
+    /// Concrete kind of the host's direct AST parent.
+    pub parent_kind: Option<AstType>,
+    /// Source start of the host node.
+    pub span_start: u32,
+    /// Start of this host's range in [`CommentAttachments::comments`].
+    pub start: u32,
+    /// Number of comments in this host's range.
+    pub len: u32,
+}
+
+/// Post-parse comment ownership sidecar.
+#[derive(Debug)]
+pub struct CommentAttachments<'a> {
+    pub hosts: Vec<'a, CommentAttachmentHost>,
+    pub comments: Vec<'a, AttachedComment>,
+}
+
+/// Optional arena-owned comment attachment table.
+#[derive(Debug, Default)]
+pub struct CommentAttachmentsStore<'a>(pub Option<Box<'a, CommentAttachments<'a>>>);
+
+/// Dummy type communicating [`CommentAttachmentsStore`] to `oxc_ast_tools`.
+#[ast(foreign = CommentAttachmentsStore)]
+#[expect(dead_code)]
+struct CommentAttachmentsStoreAlias<'a>(Option<Box<'a, u8>>);
+
+impl<'a> Dummy<'a> for CommentAttachmentsStore<'a> {
+    #[inline]
+    fn dummy(_: &'a Allocator) -> Self {
+        Self::default()
+    }
+}
+
+impl<'a> CommentAttachments<'a> {
+    #[inline]
+    pub fn new_in(allocator: &'a Allocator) -> Self {
+        Self { hosts: Vec::new_in(&allocator), comments: Vec::new_in(&allocator) }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.comments.is_empty()
+    }
 }
 
 impl Comment {

@@ -2,6 +2,7 @@ use std::ops::Not;
 
 use cow_utils::CowUtils;
 
+use oxc_ast::GetNodeId;
 use oxc_ast::ast::*;
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::{
@@ -17,16 +18,19 @@ use crate::{
 };
 
 /// Generate source code for an AST node.
-pub trait Gen: GetSpan {
+pub trait Gen: GetSpan + GetNodeId {
     /// Generate code for an AST node.
     fn r#gen(&self, p: &mut Codegen, ctx: Context);
 
     /// Generate code for an AST node. Alias for `gen`.
     #[inline]
     fn print(&self, p: &mut Codegen, ctx: Context) {
+        let mut node_comments = p.take_node_comments(self.get_node_id());
+        p.print_node_comments_before(node_comments.as_mut());
         p.print_attached_comments_at(self.span().start);
         self.r#gen(p, ctx);
         p.print_trailing_attached_comments_at(self.span().end);
+        p.print_node_comments_after(node_comments.as_mut());
     }
 
     /// Print a concrete node whose enclosing enum already owns the same
@@ -38,16 +42,19 @@ pub trait Gen: GetSpan {
 }
 
 /// Generate source code for an expression.
-pub trait GenExpr: GetSpan {
+pub trait GenExpr: GetSpan + GetNodeId {
     /// Generate code for an expression, respecting operator precedence.
     fn gen_expr(&self, p: &mut Codegen, precedence: Precedence, ctx: Context);
 
     /// Generate code for an expression, respecting operator precedence. Alias for `gen_expr`.
     #[inline]
     fn print_expr(&self, p: &mut Codegen, precedence: Precedence, ctx: Context) {
+        let mut node_comments = p.take_node_comments(self.get_node_id());
+        p.print_node_comments_before(node_comments.as_mut());
         p.print_attached_comments_at(self.span().start);
         self.gen_expr(p, precedence, ctx);
         p.print_trailing_attached_comments_at(self.span().end);
+        p.print_node_comments_after(node_comments.as_mut());
         // Map chain punctuation after a postfix operand ending in `)`/`]`.
         p.add_source_mapping_after_postfix(self.span(), precedence);
     }
@@ -855,6 +862,7 @@ impl Gen for Function<'_> {
                 p.print_soft_space();
                 p.print_leading_comments_anchored_to_self(self.params.span.start);
             }
+            p.print_node_comments_before_id(self.params.get_node_id());
             p.print_ascii_byte(b'(');
             if let Some(this_param) = &self.this_param {
                 this_param.print(p, ctx);
@@ -965,6 +973,8 @@ impl Gen for FormalParameterRest<'_> {
 impl Gen for FormalParameters<'_> {
     #[inline]
     fn print(&self, p: &mut Codegen, ctx: Context) {
+        let mut node_comments = p.take_node_comments(self.get_node_id());
+        p.print_node_comments_before(node_comments.as_mut());
         p.print_attached_comments_at(self.span.start);
         self.r#gen(p, ctx);
     }
@@ -1412,6 +1422,23 @@ impl GenExpr for Expression<'_> {
     }
 
     fn gen_expr(&self, p: &mut Codegen, precedence: Precedence, ctx: Context) {
+        let before_node_comments = p.code_len();
+        let node_starts_statement = p.start_of_stmt == before_node_comments;
+        let node_starts_arrow_expression = p.start_of_arrow_expr == before_node_comments;
+        let node_starts_default_export = p.start_of_default_export == before_node_comments;
+        let mut node_comments = p.take_node_comments(self.get_node_id());
+        p.print_node_comments_before(node_comments.as_mut());
+        if p.code_len() != before_node_comments {
+            if node_starts_statement {
+                p.start_of_stmt = p.code_len();
+            }
+            if node_starts_arrow_expression {
+                p.start_of_arrow_expr = p.code_len();
+            }
+            if node_starts_default_export {
+                p.start_of_default_export = p.code_len();
+            }
+        }
         if let Self::ParenthesizedExpression(paren) = self
             && p.leading_comments_cause_newline_before_expression(self)
         {
@@ -1423,6 +1450,7 @@ impl GenExpr for Expression<'_> {
             paren.gen_expr(p, precedence, ctx);
             p.print_ascii_byte(b')');
             p.print_trailing_attached_comments_at(self.span().end);
+            p.print_node_comments_after(node_comments.as_mut());
             return;
         }
         let before_comments = p.code_len();
@@ -1544,6 +1572,7 @@ impl GenExpr for Expression<'_> {
             Self::V8IntrinsicExpression(e) => e.print_expr(p, precedence, ctx),
         }
         p.print_trailing_attached_comments_at(self.span().end);
+        p.print_node_comments_after(node_comments.as_mut());
     }
 }
 
@@ -1961,6 +1990,8 @@ impl Gen for ObjectProperty<'_> {
                 if let Some(type_parameters) = &func.type_parameters {
                     type_parameters.print(p, ctx);
                 }
+                p.print_node_comments_before_id(func.get_node_id());
+                p.print_node_comments_before_id(func.params.get_node_id());
                 p.print_ascii_byte(b'(');
                 if let Some(this_param) = &func.this_param {
                     this_param.print(p, ctx);
@@ -2072,6 +2103,7 @@ impl GenExpr for ArrowFunctionExpression<'_> {
                         && param.initializer.is_none()
                         && !param.optional
                 };
+            p.print_node_comments_before_id(self.params.get_node_id());
             p.wrap(!remove_params_wrap, |p| {
                 self.params.print(p, params_ctx);
             });
@@ -3148,6 +3180,8 @@ impl Gen for MethodDefinition<'_> {
         if let Some(type_parameters) = self.value.type_parameters.as_ref() {
             type_parameters.print(p, ctx);
         }
+        p.print_node_comments_before_id(self.value.get_node_id());
+        p.print_node_comments_before_id(self.value.params.get_node_id());
         p.print_ascii_byte(b'(');
         if let Some(this_param) = &self.value.this_param {
             this_param.print(p, ctx);
@@ -3946,6 +3980,7 @@ impl Gen for TSFunctionType<'_> {
         if let Some(type_parameters) = &self.type_parameters {
             type_parameters.print(p, ctx);
         }
+        p.print_node_comments_before_id(self.params.get_node_id());
         p.print_ascii_byte(b'(');
         if let Some(this_param) = &self.this_param {
             this_param.print(p, ctx);
@@ -3984,6 +4019,7 @@ impl Gen for TSSignature<'_> {
                 if let Some(type_parameters) = signature.type_parameters.as_ref() {
                     type_parameters.print(p, ctx);
                 }
+                p.print_node_comments_before_id(signature.params.get_node_id());
                 p.print_ascii_byte(b'(');
                 if let Some(this_param) = &signature.this_param {
                     this_param.print(p, ctx);
@@ -4006,6 +4042,7 @@ impl Gen for TSSignature<'_> {
                 if let Some(type_parameters) = signature.type_parameters.as_ref() {
                     type_parameters.print(p, ctx);
                 }
+                p.print_node_comments_before_id(signature.params.get_node_id());
                 p.print_ascii_byte(b'(');
                 signature.params.print(p, ctx);
                 p.print_ascii_byte(b')');
@@ -4048,6 +4085,7 @@ impl Gen for TSSignature<'_> {
                 if let Some(type_parameters) = &signature.type_parameters {
                     type_parameters.print(p, ctx);
                 }
+                p.print_node_comments_before_id(signature.params.get_node_id());
                 p.print_ascii_byte(b'(');
                 if let Some(this_param) = &signature.this_param {
                     this_param.print(p, ctx);
@@ -4472,6 +4510,7 @@ impl Gen for TSConstructorType<'_> {
         if let Some(type_parameters) = &self.type_parameters {
             type_parameters.print(p, ctx);
         }
+        p.print_node_comments_before_id(self.params.get_node_id());
         p.print_ascii_byte(b'(');
         self.params.print(p, ctx);
         p.print_ascii_byte(b')');
