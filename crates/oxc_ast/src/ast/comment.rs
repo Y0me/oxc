@@ -2,14 +2,11 @@ use std::cell::Cell;
 
 use bitflags::bitflags;
 
-pub use oxc_allocator::Address;
 use oxc_allocator::{Allocator, Box, CloneIn, CloneInSemanticIds, Dummy, Vec};
 use oxc_ast_macros::ast;
 use oxc_estree::ESTree;
 use oxc_span::{ContentEq, GetSpan, Span};
 use oxc_syntax::node::NodeId;
-
-use crate::ast_kind::AstType;
 
 /// Indicates a line or block comment.
 #[ast]
@@ -196,7 +193,7 @@ pub struct Comment {
     pub content: CommentContent,
 }
 
-/// Position of a source comment relative to its post-parse AST host.
+/// Position of a source comment relative to its semantic AST host.
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
 pub enum AttachedCommentPosition {
     /// Print before the host node.
@@ -208,27 +205,23 @@ pub enum AttachedCommentPosition {
     Inside = 2,
 }
 
-/// A source comment assigned to an AST host by the post-parse attachment pass.
+/// A source comment assigned to an AST host by the semantic attachment pass.
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
 pub struct AttachedComment {
     pub comment: Comment,
     pub position: AttachedCommentPosition,
     pub same_line: bool,
+    /// Whether ordinary node-boundary printing owns this comment.
+    pub node_owned: bool,
+    /// Whether the NodeId owner is exclusive, with no source-offset fallback.
+    pub node_exclusive: bool,
 }
 
 /// A compact range of comments owned by one AST host.
-#[derive(Debug)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct CommentAttachmentHost {
-    /// Address of the host in the freshly parsed AST.
-    pub address: Address,
     /// Semantic identity assigned before transforms mutate the AST.
-    pub node_id: Cell<Option<NodeId>>,
-    /// Concrete AST node kind of this host.
-    pub kind: AstType,
-    /// Concrete kind of the host's direct AST parent.
-    pub parent_kind: Option<AstType>,
-    /// Source start of the host node.
-    pub span_start: u32,
+    pub node_id: NodeId,
     /// Start of this host's range in [`CommentAttachments::comments`].
     pub start: u32,
     /// Number of comments in this host's range.
@@ -238,8 +231,9 @@ pub struct CommentAttachmentHost {
 /// Post-parse comment ownership sidecar.
 #[derive(Debug)]
 pub struct CommentAttachments<'a> {
-    pub hosts: Vec<'a, CommentAttachmentHost>,
-    pub comments: Vec<'a, AttachedComment>,
+    hosts: Vec<'a, Cell<CommentAttachmentHost>>,
+    comments: Vec<'a, Cell<AttachedComment>>,
+    host_len: Cell<u32>,
 }
 
 /// Optional arena-owned comment attachment table.
@@ -260,13 +254,58 @@ impl<'a> Dummy<'a> for CommentAttachmentsStore<'a> {
 
 impl<'a> CommentAttachments<'a> {
     #[inline]
-    pub fn new_in(allocator: &'a Allocator) -> Self {
-        Self { hosts: Vec::new_in(&allocator), comments: Vec::new_in(&allocator) }
+    pub fn new_in(allocator: &'a Allocator, capacity: usize) -> Self {
+        Self {
+            hosts: Vec::from_iter_in(
+                std::iter::repeat_with(Cell::default).take(capacity),
+                &allocator,
+            ),
+            comments: Vec::from_iter_in(
+                std::iter::repeat_with(Cell::default).take(capacity),
+                &allocator,
+            ),
+            host_len: Cell::new(0),
+        }
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.comments.is_empty()
+        self.host_len.get() == 0
+    }
+
+    #[inline]
+    pub fn host_len(&self) -> usize {
+        self.host_len.get() as usize
+    }
+
+    #[inline]
+    pub fn host(&self, index: usize) -> CommentAttachmentHost {
+        self.hosts[index].get()
+    }
+
+    #[inline]
+    pub fn comment(&self, index: usize) -> AttachedComment {
+        self.comments[index].get()
+    }
+
+    #[inline]
+    pub fn clear(&self) {
+        self.host_len.set(0);
+    }
+
+    #[inline]
+    pub fn set_comment(&self, index: usize, comment: AttachedComment) {
+        self.comments[index].set(comment);
+    }
+
+    #[inline]
+    /// # Panics
+    ///
+    /// Panics if the attachment pass produces more hosts than source comments.
+    pub fn push_host(&self, host: CommentAttachmentHost) {
+        let index = self.host_len();
+        self.hosts[index].set(host);
+        self.host_len.set(u32::try_from(index + 1).unwrap());
     }
 }
 

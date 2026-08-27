@@ -89,10 +89,10 @@ pub mod lexer;
 
 use oxc_allocator::{Allocator, ArenaBox, ArenaVec, Dummy, GetAllocator};
 use oxc_ast::{
+    CommentAttachments,
     ast::{Expression, Program, Statement},
     builder::{AstBuilder, GetAstBuilder},
 };
-use oxc_ast_visit::comments::attach_comments;
 use oxc_diagnostics::Diagnostics;
 use oxc_span::{SourceType, Span};
 use oxc_syntax::module_record::ModuleRecord;
@@ -760,7 +760,8 @@ impl<'a, C: ParserConfig> ParserImpl<'a, C> {
 
         program.comments = self.lexer.trivia_builder.comments;
         if !program.comments.is_empty() {
-            let attachments = attach_comments(self.ast.allocator(), &program);
+            let attachments =
+                CommentAttachments::new_in(self.ast.allocator(), program.comments.len());
             program.comment_attachments.0 = Some(ArenaBox::new_in(attachments, &self.ast));
         }
 

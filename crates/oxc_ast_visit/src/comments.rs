@@ -1,22 +1,19 @@
-//! Post-parse source-comment attachment.
+//! Semantic source-comment attachment.
 
 use std::cmp::Reverse;
 
-use oxc_allocator::{Address, Allocator, GetAddress, Vec as ArenaVec};
 use oxc_ast::{
     AstKind, AstType, AttachedComment, AttachedCommentPosition, CommentAttachmentHost,
     CommentAttachments, CommentContent, ast::*,
 };
 use oxc_span::{GetSpan, Span};
-use oxc_syntax::{line_terminator::is_line_terminator, scope::ScopeFlags};
-
-use crate::Visit;
+use oxc_syntax::{line_terminator::is_line_terminator, node::NodeId};
 
 const NO_NODE: u32 = u32::MAX;
 
 #[derive(Debug)]
 struct NodeRecord {
-    address: Address,
+    node_id: NodeId,
     kind: AstType,
     parent: u32,
     span: Span,
@@ -25,30 +22,15 @@ struct NodeRecord {
     next_sibling: u32,
 }
 
-struct Collector<'c> {
+pub struct CommentAttachmentCollector<'c> {
     comments: &'c [oxc_ast::Comment],
     anchors: std::vec::Vec<u32>,
     nodes: std::vec::Vec<NodeRecord>,
-    stack: std::vec::Vec<u32>,
+    stack: std::vec::Vec<(u32, bool)>,
 }
 
-macro_rules! comment_pruning_visit_method {
-    ($visit:ident, $walk:ident, $kind:ident, $ty:ty $(, $arg:ident: $arg_ty:ty)*) => {
-        #[inline]
-        fn $visit(&mut self, it: &$ty $(, $arg: $arg_ty)*) {
-            let kind = AstKind::$kind(self.alloc(it));
-            if self.intersects_comment(kind.span()) {
-                crate::walk::$walk(self, it $(, $arg)*);
-            } else {
-                self.enter_node(kind);
-                self.leave_node(kind);
-            }
-        }
-    };
-}
-
-impl<'c> Collector<'c> {
-    fn new(comments: &'c [oxc_ast::Comment]) -> Self {
+impl<'c> CommentAttachmentCollector<'c> {
+    pub fn new(comments: &'c [oxc_ast::Comment]) -> Self {
         let mut anchors =
             comments.iter().map(|comment| comment.attached_to).collect::<std::vec::Vec<_>>();
         anchors.sort_unstable();
@@ -65,14 +47,16 @@ impl<'c> Collector<'c> {
         let anchor_index = self.anchors.partition_point(|&anchor| anchor < span.start);
         self.anchors.get(anchor_index).is_some_and(|&anchor| anchor <= span.end)
     }
-}
-
-impl<'a> Visit<'a> for Collector<'_> {
-    crate::generate_comment_pruning_visit_methods!();
-
-    fn enter_node(&mut self, kind: AstKind<'a>) {
+    /// # Panics
+    ///
+    /// Panics if the AST contains more nodes than a `u32` can index.
+    pub fn enter_node(&mut self, kind: AstKind<'_>) {
+        if self.stack.last().is_some_and(|(_, walk_descendants)| !walk_descendants) {
+            self.stack.push((NO_NODE, false));
+            return;
+        }
         let index = u32::try_from(self.nodes.len()).unwrap();
-        let parent = self.stack.last().copied().unwrap_or(NO_NODE);
+        let parent = self.stack.last().map_or(NO_NODE, |&(parent, _)| parent);
         let next_sibling = if parent == NO_NODE {
             NO_NODE
         } else {
@@ -82,9 +66,7 @@ impl<'a> Visit<'a> for Collector<'_> {
             first_child
         };
         self.nodes.push(NodeRecord {
-            // `Program` is returned by value and therefore moves after parsing.
-            // Use the reserved dummy address as its durable parser-only key.
-            address: if self.stack.is_empty() { Address::DUMMY } else { kind.address() },
+            node_id: kind.node_id(),
             kind: kind.ty(),
             parent,
             span: kind.span(),
@@ -92,10 +74,10 @@ impl<'a> Visit<'a> for Collector<'_> {
             first_child: NO_NODE,
             next_sibling,
         });
-        self.stack.push(index);
+        self.stack.push((index, self.intersects_comment(kind.span())));
     }
 
-    fn leave_node(&mut self, _kind: AstKind<'a>) {
+    pub fn leave_node(&mut self) {
         self.stack.pop();
     }
 }
@@ -316,60 +298,84 @@ impl<'a> Attacher<'a> {
     }
 }
 
-/// Assign every parser comment to an AST host.
-pub fn attach_comments<'a>(
-    allocator: &'a Allocator,
-    program: &Program<'a>,
-) -> CommentAttachments<'a> {
-    if program.comments.is_empty() {
-        return CommentAttachments::new_in(allocator);
-    }
-
-    let mut collector = Collector::new(&program.comments);
-    collector.visit_program(program);
-    let assignments =
-        Attacher::new(program.source_text, &collector.nodes, &program.comments).attach();
-
-    let mut offsets = vec![0_u32; collector.nodes.len() + 1];
-    for assignment in &assignments {
-        offsets[assignment.host as usize + 1] += 1;
-    }
-    for index in 0..collector.nodes.len() {
-        offsets[index + 1] += offsets[index];
-    }
-    let mut write_offsets = offsets[..collector.nodes.len()].to_vec();
-    let mut sorted = vec![AttachedComment::default(); program.comments.len()];
-    for (mut comment, assignment) in program.comments.iter().copied().zip(assignments) {
-        if assignment.force_newline_after {
-            comment.set_followed_by_newline(true);
+/// Assign every parser comment to an AST host after semantic NodeIds are available.
+impl CommentAttachmentCollector<'_> {
+    /// # Panics
+    ///
+    /// Panics if comment or node counts exceed the sidecar's `u32` indices.
+    pub fn attach<'a>(self, program: &Program<'a>, attachments: &CommentAttachments<'a>) {
+        attachments.clear();
+        if program.comments.is_empty() {
+            return;
         }
-        let host = assignment.host as usize;
-        let target = write_offsets[host];
-        sorted[target as usize] = AttachedComment {
-            comment,
-            position: assignment.position,
-            same_line: assignment.same_line,
-        };
-        write_offsets[host] += 1;
-    }
 
-    let mut hosts = ArenaVec::new_in(&allocator);
-    for (index, node) in collector.nodes.iter().enumerate() {
-        let len = offsets[index + 1] - offsets[index];
-        if len == 0 {
-            continue;
+        let assignments =
+            Attacher::new(program.source_text, &self.nodes, &program.comments).attach();
+
+        let mut offsets = vec![0_u32; self.nodes.len() + 1];
+        for assignment in &assignments {
+            offsets[assignment.host as usize + 1] += 1;
         }
-        hosts.push(CommentAttachmentHost {
-            address: node.address,
-            node_id: std::cell::Cell::new(None),
-            kind: node.kind,
-            parent_kind: (node.parent != NO_NODE)
-                .then(|| collector.nodes[node.parent as usize].kind),
-            span_start: node.span.start,
-            start: offsets[index],
-            len,
-        });
+        for index in 0..self.nodes.len() {
+            offsets[index + 1] += offsets[index];
+        }
+        let mut write_offsets = offsets[..self.nodes.len()].to_vec();
+        let mut sorted = vec![AttachedComment::default(); program.comments.len()];
+        let mut source_only_hosts = vec![false; self.nodes.len()];
+        for (comment, assignment) in program.comments.iter().zip(&assignments) {
+            if comment.is_line() || assignment.position == AttachedCommentPosition::Inside {
+                source_only_hosts[assignment.host as usize] = true;
+            }
+        }
+        for (mut comment, assignment) in program.comments.iter().copied().zip(assignments) {
+            if assignment.force_newline_after {
+                comment.set_followed_by_newline(true);
+            }
+            let host = assignment.host as usize;
+            let node = &self.nodes[host];
+            let exact_leading = comment.is_leading() && comment.attached_to == node.span.start;
+            let owned_composite_gap = node.kind == AstType::FormalParameters
+                || (node.kind == AstType::Function
+                    && node.parent != NO_NODE
+                    && matches!(
+                        self.nodes[node.parent as usize].kind,
+                        AstType::ObjectProperty | AstType::MethodDefinition
+                    ));
+            let owned_position = match assignment.position {
+                AttachedCommentPosition::Before => exact_leading || owned_composite_gap,
+                AttachedCommentPosition::After => {
+                    comment.is_block()
+                        && matches!(node.kind, AstType::FormalParameter | AstType::ObjectExpression)
+                }
+                AttachedCommentPosition::Inside => false,
+            };
+            let target = write_offsets[host];
+            let attached = AttachedComment {
+                comment,
+                position: assignment.position,
+                same_line: assignment.same_line,
+                node_owned: !source_only_hosts[host] && owned_position,
+                node_exclusive: !source_only_hosts[host]
+                    && owned_position
+                    && (!exact_leading || assignment.position != AttachedCommentPosition::Before),
+            };
+            sorted[target as usize] = attached;
+            write_offsets[host] += 1;
+        }
+
+        for (index, node) in self.nodes.iter().enumerate() {
+            let len = offsets[index + 1] - offsets[index];
+            if len == 0 {
+                continue;
+            }
+            attachments.push_host(CommentAttachmentHost {
+                node_id: node.node_id,
+                start: offsets[index],
+                len,
+            });
+        }
+        for (index, comment) in sorted.into_iter().enumerate() {
+            attachments.set_comment(index, comment);
+        }
     }
-    let comments = ArenaVec::from_iter_in(sorted, &allocator);
-    CommentAttachments { hosts, comments }
 }

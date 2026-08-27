@@ -40,7 +40,7 @@ fn comments_are_not_lost() {
 }
 
 #[test]
-fn semantic_comment_hosts_are_rebound_and_printed_once() {
+fn semantic_comment_hosts_are_assigned_and_printed_once() {
     for source in [
         "/* c0 */async/* c1 */ function/* c2 */* /* c3 */foo/* c4 */() /* c5 */ {}",
         "const foo /* #__PURE__ */ = pureOperation();",
@@ -52,9 +52,12 @@ fn semantic_comment_hosts_are_rebound_and_printed_once() {
         let allocator = Allocator::default();
         let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
         assert!(ret.diagnostics.is_empty());
-        SemanticBuilder::new().with_build_nodes(true).build(&ret.program);
+        let semantic = SemanticBuilder::new().with_build_nodes(true).build(&ret.program).semantic;
         let attachments = ret.program.comment_attachments.0.as_deref().unwrap();
-        assert!(attachments.hosts.iter().all(|host| host.node_id.get().is_some()));
+        assert!(
+            (0..attachments.host_len())
+                .all(|index| attachments.host(index).node_id.index() < semantic.nodes().len())
+        );
 
         let printed = Codegen::new().build(&ret.program).code;
         for comment in &ret.program.comments {
@@ -71,17 +74,17 @@ fn semantic_comment_hosts_are_rebound_and_printed_once() {
 }
 
 #[test]
-fn post_parse_comment_attachment() {
+fn semantic_comment_attachment() {
     let allocator = Allocator::default();
     let source = "first(); /* after */\n/* before */ second(); const empty = [/* inside */];";
     let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
     assert!(ret.diagnostics.is_empty());
+    SemanticBuilder::new().build(&ret.program);
     let attachments = ret.program.comment_attachments.0.as_deref().unwrap();
 
     let position = |marker: &str| {
-        attachments
-            .comments
-            .iter()
+        (0..ret.program.comments.len())
+            .map(|index| attachments.comment(index))
             .find(|attached| attached.comment.span.source_text(source).contains(marker))
             .map(|attached| attached.position)
             .unwrap()
@@ -92,8 +95,9 @@ fn post_parse_comment_attachment() {
 
     let pure_source = "const foo /* #__PURE__ */ = pureOperation();";
     let ret = Parser::new(&allocator, pure_source, SourceType::ts()).parse();
+    SemanticBuilder::new().build(&ret.program);
     let attachments = ret.program.comment_attachments.0.as_deref().unwrap();
-    assert_eq!(attachments.comments[0].position, AttachedCommentPosition::After);
+    assert_eq!(attachments.comment(0).position, AttachedCommentPosition::After);
 }
 
 #[test]

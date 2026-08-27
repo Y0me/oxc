@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use oxc_ast::{
@@ -18,7 +18,8 @@ type CommentList = SmallVec<[Comment; 1]>;
 pub struct NodeCommentStore {
     hosts: Vec<(NodeId, NodeComments)>,
     presence: Box<[u64]>,
-    claimed: Vec<u32>,
+    owners: FxHashMap<u32, NodeId>,
+    exclusive: Vec<u32>,
 }
 
 #[derive(Default)]
@@ -28,36 +29,38 @@ pub struct NodeComments {
     after: CommentList,
 }
 
-pub(crate) struct BoundaryComments {
-    pub(crate) node: Option<NodeComments>,
-    pub(crate) leading: bool,
-    pub(crate) trailing: bool,
+pub struct BoundaryComments {
+    pub node: Option<NodeComments>,
+    pub leading: bool,
+    pub trailing: bool,
 }
 
 impl NodeCommentStore {
     fn build(program: &Program<'_>, mut retain: impl FnMut(Comment) -> bool) -> Option<Self> {
         let attachments = program.comment_attachments.0.as_deref()?;
-        if attachments.hosts.iter().any(|host| host.node_id.get().is_none()) {
+        if attachments.is_empty() {
             return None;
         }
 
         let mut hosts = Vec::new();
-        let mut claimed = Vec::new();
-        for host in &attachments.hosts {
-            let node_id = host.node_id.get().unwrap();
+        let mut owners = FxHashMap::default();
+        let mut exclusive = Vec::new();
+        for host_index in 0..attachments.host_len() {
+            let host = attachments.host(host_index);
+            let node_id = host.node_id;
             let start = host.start as usize;
             let end = start + host.len as usize;
             let mut comments = NodeComments::default();
-            for attached in &attachments.comments[start..end] {
+            for attached_index in start..end {
+                let attached = attachments.comment(attached_index);
                 let comment = attached.comment;
-                let owned_position = match attached.position {
-                    AttachedCommentPosition::Before | AttachedCommentPosition::After => true,
-                    AttachedCommentPosition::Inside => false,
-                };
-                if !owned_position || !retain(comment) {
+                if !attached.node_owned || !retain(comment) {
                     continue;
                 }
-                claimed.push(comment.span.start);
+                owners.insert(comment.span.start, node_id);
+                if attached.node_exclusive {
+                    exclusive.push(comment.span.start);
+                }
                 match attached.position {
                     AttachedCommentPosition::Before => comments.before.push(comment),
                     AttachedCommentPosition::After => comments.after.push(comment),
@@ -79,8 +82,8 @@ impl NodeCommentStore {
         for (node_id, _) in &hosts {
             presence[node_id.index() >> 6] |= 1 << (node_id.index() & 63);
         }
-        claimed.sort_unstable();
-        Some(Self { hosts, presence, claimed })
+        exclusive.sort_unstable();
+        Some(Self { hosts, presence, owners, exclusive })
     }
 
     #[inline]
@@ -94,6 +97,36 @@ impl NodeCommentStore {
         *word &= !mask;
         let host_index = self.hosts.binary_search_by_key(&index, |(id, _)| id.index()).unwrap();
         Some(std::mem::take(&mut self.hosts[host_index].1))
+    }
+
+    fn remove_comments(&mut self, removed: &[Comment]) {
+        for comment in removed {
+            let Some(node_id) = self.owners.remove(&comment.span.start) else { continue };
+            let node_index = node_id.index();
+            let Some(word) = self.presence.get_mut(node_index >> 6) else { continue };
+            let mask = 1 << (node_index & 63);
+            if *word & mask == 0 {
+                continue;
+            }
+            let host_index =
+                self.hosts.binary_search_by_key(&node_index, |(id, _)| id.index()).unwrap();
+            let node_comments = &mut self.hosts[host_index].1;
+            let mut removed_count = 0;
+            for comments in
+                [&mut node_comments.before, &mut node_comments.inside, &mut node_comments.after]
+            {
+                let before = comments.len();
+                comments.retain(|candidate| candidate.span != comment.span);
+                removed_count += before - comments.len();
+            }
+            if removed_count != 0
+                && node_comments.before.is_empty()
+                && node_comments.inside.is_empty()
+                && node_comments.after.is_empty()
+            {
+                *word &= !mask;
+            }
+        }
     }
 }
 
@@ -261,6 +294,21 @@ impl CommentStore {
         let comments = take_matching(&mut self.groups[index].trailing, predicate);
         self.remaining -= comments.len();
         comments
+    }
+
+    fn remove_comments(&mut self, removed: &[Comment]) {
+        if removed.is_empty() || self.remaining == 0 {
+            return;
+        }
+        for comment in removed {
+            let Some(index) = self.index(comment.attached_to) else { continue };
+            let group = &mut self.groups[index];
+            for comments in [&mut group.leading, &mut group.trailing] {
+                let before = comments.len();
+                comments.retain(|candidate| candidate.span != comment.span);
+                self.remaining -= before - comments.len();
+            }
+        }
     }
 
     #[inline]
@@ -461,8 +509,7 @@ impl Codegen<'_> {
         self.comments = CommentStore::build(&mut retained);
     }
 
-    /// Build the fast NodeId-owned comment store when semantic analysis has
-    /// rebound every parser attachment host.
+    /// Build the fast NodeId-owned comment store produced by semantic analysis.
     pub(crate) fn build_node_comments(&mut self, program: &Program<'_>) -> bool {
         let Some(store) = NodeCommentStore::build(program, |comment| {
             if comment.is_line()
@@ -488,7 +535,7 @@ impl Codegen<'_> {
             .iter()
             .copied()
             .filter(|comment| {
-                self.node_comments.claimed.binary_search(&comment.span.start).is_err()
+                self.node_comments.exclusive.binary_search(&comment.span.start).is_err()
             })
             .collect::<Vec<_>>();
         self.build_comments(&fallback_comments);
@@ -563,6 +610,7 @@ impl Codegen<'_> {
         if comments.is_empty() {
             return;
         }
+        self.comments.remove_comments(&comments);
         self.print_comments_inner(&comments);
         if self.last_byte() != Some(b'\n') {
             self.consume_pending_indent_space();
@@ -575,6 +623,7 @@ impl Codegen<'_> {
         if comments.is_empty() {
             return;
         }
+        self.comments.remove_comments(&comments);
         let removed_newline = self.last_byte() == Some(b'\n');
         if removed_newline {
             self.code.pop_byte();
@@ -665,6 +714,7 @@ impl Codegen<'_> {
         let comments = self
             .comments
             .take_matching_at(start, |comment| !comment.is_pure() && !comment.is_no_side_effects());
+        self.node_comments.remove_comments(&comments);
         (!comments.is_empty()).then_some(comments)
     }
 
@@ -1171,6 +1221,7 @@ impl Codegen<'_> {
         if comments.is_empty() {
             return false;
         }
+        self.node_comments.remove_comments(comments);
         for comment in comments {
             self.print_hard_newline();
             self.print_indent();
@@ -1186,6 +1237,7 @@ impl Codegen<'_> {
     }
 
     pub(crate) fn print_comments(&mut self, comments: &[Comment]) {
+        self.node_comments.remove_comments(comments);
         self.print_comments_inner(comments);
     }
 

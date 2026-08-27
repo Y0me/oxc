@@ -8,9 +8,9 @@ use std::{
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-use oxc_allocator::{Address, ArenaVec, GetAddress};
+use oxc_allocator::{Address, ArenaVec};
 use oxc_ast::{AstKind, ast::*};
-use oxc_ast_visit::Visit;
+use oxc_ast_visit::{Visit, comments::CommentAttachmentCollector};
 #[cfg(feature = "cfg")]
 use oxc_cfg::{
     ControlFlowGraphBuilder, CtxCursor, CtxFlags, EdgeType, ErrorEdgeKind, InstructionKind,
@@ -46,59 +46,6 @@ macro_rules! control_flow {
     ($self:ident, |$cfg:tt| $body:expr) => {
         if let Some($cfg) = &mut $self.cfg { $body } else { Default::default() }
     };
-}
-
-enum CommentHostLookup {
-    Inline(SmallVec<[(Address, usize); 8]>),
-    Map(FxHashMap<Address, usize>),
-}
-
-struct CommentHostBinder<'a> {
-    attachments: &'a CommentAttachments<'a>,
-    lookup: CommentHostLookup,
-}
-
-impl<'a> CommentHostBinder<'a> {
-    fn new(attachments: &'a CommentAttachments<'a>) -> Self {
-        let lookup = if attachments.hosts.len() <= 8 {
-            CommentHostLookup::Inline(
-                attachments
-                    .hosts
-                    .iter()
-                    .enumerate()
-                    .map(|(index, host)| (host.address, index))
-                    .collect(),
-            )
-        } else {
-            CommentHostLookup::Map(
-                attachments
-                    .hosts
-                    .iter()
-                    .enumerate()
-                    .map(|(index, host)| (host.address, index))
-                    .collect(),
-            )
-        };
-        Self { attachments, lookup }
-    }
-
-    #[inline]
-    fn bind(&mut self, address: Address, node_id: NodeId) {
-        let index = match &mut self.lookup {
-            CommentHostLookup::Inline(hosts) => {
-                let Some(index) = hosts.iter().position(|(candidate, _)| *candidate == address)
-                else {
-                    return;
-                };
-                hosts.swap_remove(index).1
-            }
-            CommentHostLookup::Map(hosts) => {
-                let Some(index) = hosts.remove(&address) else { return };
-                index
-            }
-        };
-        self.attachments.hosts[index].node_id.set(Some(node_id));
-    }
 }
 
 #[cfg(not(feature = "cfg"))]
@@ -149,7 +96,7 @@ pub struct SemanticBuilder<'a> {
     pub(crate) node_store: AstNodeStore<'a>,
     pub(crate) scoping: Scoping,
 
-    comment_host_binder: Option<CommentHostBinder<'a>>,
+    comment_attachment_collector: Option<CommentAttachmentCollector<'a>>,
 
     pub(crate) unresolved_references: UnresolvedReferences<'a>,
 
@@ -210,7 +157,7 @@ impl<'a> SemanticBuilder<'a> {
             node_store: AstNodeStore::default(),
             hoisting_variables: FxHashMap::default(),
             scoping,
-            comment_host_binder: None,
+            comment_attachment_collector: None,
             unresolved_references: UnresolvedReferences::new(),
             unused_labels: UnusedLabels::default(),
             #[cfg(feature = "jsdoc")]
@@ -397,8 +344,18 @@ impl<'a> SemanticBuilder<'a> {
 
         self.class_table_builder.enabled |= self.check_syntax_error;
 
+        if program.comment_attachments.0.is_some() {
+            self.comment_attachment_collector =
+                Some(CommentAttachmentCollector::new(&program.comments));
+        }
+
         // Visit AST to generate scopes tree etc
         self.visit_program(program);
+        if let Some(collector) = self.comment_attachment_collector.take()
+            && let Some(attachments) = program.comment_attachments.0.as_deref()
+        {
+            collector.attach(program, attachments);
+        }
 
         // Check that estimated counts accurately (unless in release mode)
         #[cfg(debug_assertions)]
@@ -495,8 +452,8 @@ impl<'a> SemanticBuilder<'a> {
         // 1. Standalone node-id increment.
         let node_id = self.node_store.alloc_node_id();
         kind.set_node_id(node_id);
-        if let Some(binder) = &mut self.comment_host_binder {
-            binder.bind(kind.address(), node_id);
+        if let Some(collector) = &mut self.comment_attachment_collector {
+            collector.enter_node(kind);
         }
         let parent_node_id = self.node_store.current_node_id;
         self.node_store.current_node_id = node_id;
@@ -933,14 +890,13 @@ impl<'a> Visit<'a> for SemanticBuilder<'a> {
         if self.check_syntax_error {
             checker::check(kind, self);
         }
+        if let Some(collector) = &mut self.comment_attachment_collector {
+            collector.leave_node();
+        }
         self.pop_ast_node();
     }
 
     fn visit_program(&mut self, program: &Program<'a>) {
-        if let Some(attachments) = program.comment_attachments.0.as_deref() {
-            let attachments = self.alloc(attachments);
-            self.comment_host_binder = Some(CommentHostBinder::new(attachments));
-        }
         let kind = AstKind::Program(self.alloc(program));
         /* cfg */
         #[cfg(feature = "cfg")]
@@ -960,8 +916,8 @@ impl<'a> Visit<'a> for SemanticBuilder<'a> {
         let node_id = self.node_store.alloc_node_id();
         debug_assert_eq!(node_id, NodeId::ROOT);
         kind.set_node_id(node_id);
-        if let Some(binder) = &mut self.comment_host_binder {
-            binder.bind(Address::DUMMY, node_id);
+        if let Some(collector) = &mut self.comment_attachment_collector {
+            collector.enter_node(kind);
         }
         self.node_store.current_node_id = node_id;
         // 2 & 3. Either the full node store or the ancestry stack — never both.
