@@ -26,23 +26,23 @@ pub trait Gen: GetSpan + GetNodeId {
     #[inline]
     fn print(&self, p: &mut Codegen, ctx: Context) {
         let span = self.span();
-        let mut boundary = p.take_boundary_comments(self.get_node_id(), span.start, span.end);
-        if let Some(boundary) = boundary.as_mut() {
-            if let Some(comments) = boundary.node.as_mut() {
-                p.print_node_comments_before(comments);
-            }
-            if boundary.leading {
-                p.print_attached_comments_at(span.start);
-            }
+        let Some(mut boundary) = p.take_boundary_comments(self.get_node_id(), span.start, span.end)
+        else {
+            self.r#gen(p, ctx);
+            return;
+        };
+        if let Some(comments) = boundary.node.as_mut() {
+            p.print_node_comments_before(comments);
+        }
+        if boundary.leading {
+            p.print_attached_comments_at(span.start);
         }
         self.r#gen(p, ctx);
-        if let Some(boundary) = boundary.as_mut() {
-            if boundary.trailing {
-                p.print_trailing_attached_comments_at(span.end);
-            }
-            if let Some(comments) = boundary.node.as_mut() {
-                p.print_node_comments_after(comments);
-            }
+        if boundary.trailing {
+            p.print_trailing_attached_comments_at(span.end);
+        }
+        if let Some(comments) = boundary.node.as_mut() {
+            p.print_node_comments_after(comments);
         }
     }
 
@@ -63,26 +63,27 @@ pub trait GenExpr: GetSpan + GetNodeId {
     #[inline]
     fn print_expr(&self, p: &mut Codegen, precedence: Precedence, ctx: Context) {
         let span = self.span();
-        let mut boundary = p.take_boundary_comments(self.get_node_id(), span.start, span.end);
-        if let Some(boundary) = boundary.as_mut() {
-            if let Some(comments) = boundary.node.as_mut() {
-                p.print_node_comments_before(comments);
-            }
-            if boundary.leading {
-                p.print_attached_comments_at(span.start);
-            }
+        let Some(mut boundary) = p.take_boundary_comments(self.get_node_id(), span.start, span.end)
+        else {
+            self.gen_expr(p, precedence, ctx);
+            p.add_source_mapping_after_postfix(span, precedence);
+            return;
+        };
+        if let Some(comments) = boundary.node.as_mut() {
+            p.print_node_comments_before(comments);
+        }
+        if boundary.leading {
+            p.print_attached_comments_at(span.start);
         }
         self.gen_expr(p, precedence, ctx);
-        if let Some(boundary) = boundary.as_mut() {
-            if boundary.trailing {
-                p.print_trailing_attached_comments_at(span.end);
-            }
-            if let Some(comments) = boundary.node.as_mut() {
-                p.print_node_comments_after(comments);
-            }
+        if boundary.trailing {
+            p.print_trailing_attached_comments_at(span.end);
+        }
+        if let Some(comments) = boundary.node.as_mut() {
+            p.print_node_comments_after(comments);
         }
         // Map chain punctuation after a postfix operand ending in `)`/`]`.
-        p.add_source_mapping_after_postfix(self.span(), precedence);
+        p.add_source_mapping_after_postfix(span, precedence);
     }
 
     /// Print a concrete expression whose enclosing [`Expression`] already
