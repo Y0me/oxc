@@ -17,7 +17,7 @@ type CommentList = SmallVec<[Comment; 1]>;
 #[derive(Default)]
 pub struct CommentStore {
     groups: Vec<CommentGroup>,
-    anchor_bits: Box<[u64]>,
+    anchor_pages: Box<[Option<Box<[u32; 64]>>]>,
     orphan_indices: Box<[usize]>,
     remaining: usize,
 }
@@ -29,22 +29,21 @@ struct CommentGroup {
 }
 
 impl CommentStore {
-    const ANCHOR_FILTER_BITS: usize = 1 << 15;
-    const ANCHOR_FILTER_MASK: usize = Self::ANCHOR_FILTER_BITS - 1;
-
     fn build(comments: &mut Vec<Comment>) -> Self {
         let remaining = comments.len();
         comments.sort_unstable_by_key(|comment| (comment.attached_to, comment.span.start));
         let mut groups = Vec::<CommentGroup>::new();
-        let mut anchor_bits = if remaining == 0 {
-            Box::default()
+        let mut anchor_pages = if let Some(last) = comments.last() {
+            vec![None; (last.attached_to as usize >> 6) + 1].into_boxed_slice()
         } else {
-            vec![0_u64; Self::ANCHOR_FILTER_BITS / 64].into_boxed_slice()
+            Box::default()
         };
         for comment in comments.drain(..) {
             if groups.last().is_none_or(|group| group.anchor != comment.attached_to) {
-                let bit = Self::anchor_filter_bit(comment.attached_to);
-                anchor_bits[bit / 64] |= 1_u64 << (bit % 64);
+                let anchor = comment.attached_to as usize;
+                let page =
+                    anchor_pages[anchor >> 6].get_or_insert_with(|| Box::new([u32::MAX; 64]));
+                page[anchor & 63] = u32::try_from(groups.len()).unwrap();
                 groups.push(CommentGroup {
                     anchor: comment.attached_to,
                     leading: CommentList::new(),
@@ -71,7 +70,7 @@ impl CommentStore {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Self { groups, anchor_bits, orphan_indices, remaining }
+        Self { groups, anchor_pages, orphan_indices, remaining }
     }
 
     #[inline]
@@ -79,8 +78,11 @@ impl CommentStore {
         if self.remaining == 0 {
             return false;
         }
-        let bit = Self::anchor_filter_bit(anchor);
-        self.anchor_bits[bit / 64] & (1_u64 << (bit % 64)) != 0
+        let anchor = anchor as usize;
+        self.anchor_pages
+            .get(anchor >> 6)
+            .and_then(Option::as_deref)
+            .is_some_and(|page| page[anchor & 63] != u32::MAX)
     }
 
     #[inline]
@@ -88,12 +90,9 @@ impl CommentStore {
         if !self.may_have_anchor(anchor) {
             return None;
         }
-        self.groups.binary_search_by_key(&anchor, |group| group.anchor).ok()
-    }
-
-    #[inline]
-    fn anchor_filter_bit(anchor: u32) -> usize {
-        anchor as usize & Self::ANCHOR_FILTER_MASK
+        let anchor = anchor as usize;
+        let page = self.anchor_pages[anchor >> 6].as_deref().unwrap();
+        Some(page[anchor & 63] as usize)
     }
 
     fn has_non_semantic_at(&self, anchor: u32) -> bool {
