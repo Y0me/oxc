@@ -222,7 +222,7 @@ pub struct AttachedComment {
 pub struct CommentAttachmentHost {
     /// Semantic identity assigned before transforms mutate the AST.
     pub node_id: NodeId,
-    /// Start of this host's range in [`CommentAttachments::comments`].
+    /// Start of this host's range in the attachment comment buffer.
     pub start: u32,
     /// Number of comments in this host's range.
     pub len: u32,
