@@ -200,6 +200,10 @@ impl<'a> Attacher<'a> {
             self.scratch.push(child as usize);
             child = self.nodes[child as usize].next_sibling;
         }
+        // Children are linked by prepending during the visitor walk. Restore
+        // visitation order so the insertion sort below sees the overwhelmingly
+        // common already-source-ordered case instead of its quadratic worst case.
+        self.scratch[checkpoint..].reverse();
         self.sort_scratch_children(checkpoint);
 
         let mut previous = None;
