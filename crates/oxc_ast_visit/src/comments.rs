@@ -7,7 +7,9 @@ use oxc_ast::{
     CommentAttachments, CommentContent, ast::*,
 };
 use oxc_span::{GetSpan, Span};
-use oxc_syntax::{line_terminator::is_line_terminator, node::NodeId};
+use oxc_syntax::{line_terminator::is_line_terminator, node::NodeId, scope::ScopeFlags};
+
+use crate::Visit;
 
 const NO_NODE: u32 = u32::MAX;
 
@@ -26,7 +28,22 @@ pub struct CommentAttachmentCollector<'c> {
     comments: &'c [oxc_ast::Comment],
     anchors: std::vec::Vec<u32>,
     nodes: std::vec::Vec<NodeRecord>,
-    stack: std::vec::Vec<(u32, bool)>,
+    stack: std::vec::Vec<u32>,
+}
+
+macro_rules! comment_pruning_visit_method {
+    ($visit:ident, $walk:ident, $kind:ident, $ty:ty $(, $arg:ident: $arg_ty:ty)*) => {
+        #[inline]
+        fn $visit(&mut self, it: &$ty $(, $arg: $arg_ty)*) {
+            let kind = AstKind::$kind(self.alloc(it));
+            if self.intersects_comment(kind.span()) {
+                crate::walk::$walk(self, it $(, $arg)*);
+            } else {
+                self.enter_node(kind);
+                self.leave_node(kind);
+            }
+        }
+    };
 }
 
 impl<'c> CommentAttachmentCollector<'c> {
@@ -47,16 +64,14 @@ impl<'c> CommentAttachmentCollector<'c> {
         let anchor_index = self.anchors.partition_point(|&anchor| anchor < span.start);
         self.anchors.get(anchor_index).is_some_and(|&anchor| anchor <= span.end)
     }
-    /// # Panics
-    ///
-    /// Panics if the AST contains more nodes than a `u32` can index.
-    pub fn enter_node(&mut self, kind: AstKind<'_>) {
-        if self.stack.last().is_some_and(|(_, walk_descendants)| !walk_descendants) {
-            self.stack.push((NO_NODE, false));
-            return;
-        }
+}
+
+impl<'a> Visit<'a> for CommentAttachmentCollector<'_> {
+    crate::generate_comment_pruning_visit_methods!();
+
+    fn enter_node(&mut self, kind: AstKind<'a>) {
         let index = u32::try_from(self.nodes.len()).unwrap();
-        let parent = self.stack.last().map_or(NO_NODE, |&(parent, _)| parent);
+        let parent = self.stack.last().copied().unwrap_or(NO_NODE);
         let next_sibling = if parent == NO_NODE {
             NO_NODE
         } else {
@@ -74,10 +89,10 @@ impl<'c> CommentAttachmentCollector<'c> {
             first_child: NO_NODE,
             next_sibling,
         });
-        self.stack.push((index, self.intersects_comment(kind.span())));
+        self.stack.push(index);
     }
 
-    pub fn leave_node(&mut self) {
+    fn leave_node(&mut self, _kind: AstKind<'a>) {
         self.stack.pop();
     }
 }

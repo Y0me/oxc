@@ -52,7 +52,11 @@ fn semantic_comment_hosts_are_assigned_and_printed_once() {
         let allocator = Allocator::default();
         let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
         assert!(ret.diagnostics.is_empty());
-        let semantic = SemanticBuilder::new().with_build_nodes(true).build(&ret.program).semantic;
+        let semantic = SemanticBuilder::new()
+            .with_build_nodes(true)
+            .with_build_comment_attachments(true)
+            .build(&ret.program)
+            .semantic;
         let attachments = ret.program.comment_attachments.0.as_deref().unwrap();
         assert!(
             (0..attachments.host_len())
@@ -67,7 +71,10 @@ fn semantic_comment_hosts_are_assigned_and_printed_once() {
 
         let allocator2 = Allocator::default();
         let ret2 = Parser::new(&allocator2, &printed, SourceType::ts()).parse();
-        SemanticBuilder::new().with_build_nodes(true).build(&ret2.program);
+        SemanticBuilder::new()
+            .with_build_nodes(true)
+            .with_build_comment_attachments(true)
+            .build(&ret2.program);
         let printed2 = Codegen::new().build(&ret2.program).code;
         assert_eq!(printed2, printed, "semantic codegen is not idempotent for {source}");
     }
@@ -79,8 +86,18 @@ fn semantic_comment_attachment() {
     let source = "first(); /* after */\n/* before */ second(); const empty = [/* inside */];";
     let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
     assert!(ret.diagnostics.is_empty());
-    SemanticBuilder::new().build(&ret.program);
+    SemanticBuilder::new().with_build_comment_attachments(true).build(&ret.program);
     let attachments = ret.program.comment_attachments.0.as_deref().unwrap();
+    let host_ids = (0..attachments.host_len())
+        .map(|index| attachments.host(index).node_id)
+        .collect::<Vec<_>>();
+    SemanticBuilder::new().with_build_comment_attachments(true).build(&ret.program);
+    assert_eq!(
+        host_ids,
+        (0..attachments.host_len())
+            .map(|index| attachments.host(index).node_id)
+            .collect::<Vec<_>>()
+    );
 
     let position = |marker: &str| {
         (0..ret.program.comments.len())
@@ -95,7 +112,7 @@ fn semantic_comment_attachment() {
 
     let pure_source = "const foo /* #__PURE__ */ = pureOperation();";
     let ret = Parser::new(&allocator, pure_source, SourceType::ts()).parse();
-    SemanticBuilder::new().build(&ret.program);
+    SemanticBuilder::new().with_build_comment_attachments(true).build(&ret.program);
     let attachments = ret.program.comment_attachments.0.as_deref().unwrap();
     assert_eq!(attachments.comment(0).position, AttachedCommentPosition::After);
 }

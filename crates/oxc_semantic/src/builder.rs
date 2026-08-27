@@ -96,8 +96,6 @@ pub struct SemanticBuilder<'a> {
     pub(crate) node_store: AstNodeStore<'a>,
     pub(crate) scoping: Scoping,
 
-    comment_attachment_collector: Option<CommentAttachmentCollector<'a>>,
-
     pub(crate) unresolved_references: UnresolvedReferences<'a>,
 
     unused_labels: UnusedLabels<'a>,
@@ -108,6 +106,9 @@ pub struct SemanticBuilder<'a> {
 
     /// Should enum member values be evaluated?
     enum_eval: bool,
+
+    /// Whether to assign source comments to NodeIds for a later codegen pass.
+    build_comment_attachments: bool,
 
     /// Should additional syntax checks be performed?
     ///
@@ -157,7 +158,6 @@ impl<'a> SemanticBuilder<'a> {
             node_store: AstNodeStore::default(),
             hoisting_variables: FxHashMap::default(),
             scoping,
-            comment_attachment_collector: None,
             unresolved_references: UnresolvedReferences::new(),
             unused_labels: UnusedLabels::default(),
             #[cfg(feature = "jsdoc")]
@@ -165,6 +165,7 @@ impl<'a> SemanticBuilder<'a> {
             stats: None,
             excess_capacity: 0.0,
             enum_eval: false,
+            build_comment_attachments: false,
             check_syntax_error: false,
             #[cfg(feature = "cfg")]
             cfg: None,
@@ -246,6 +247,15 @@ impl<'a> SemanticBuilder<'a> {
     #[must_use]
     pub fn with_enum_eval(mut self, yes: bool) -> Self {
         self.enum_eval = yes;
+        self
+    }
+
+    /// Enable or disable assigning source comments to NodeIds for codegen.
+    ///
+    /// Disabled by default because semantic-only consumers do not use this metadata.
+    #[must_use]
+    pub fn with_build_comment_attachments(mut self, yes: bool) -> Self {
+        self.build_comment_attachments = yes;
         self
     }
 
@@ -344,16 +354,14 @@ impl<'a> SemanticBuilder<'a> {
 
         self.class_table_builder.enabled |= self.check_syntax_error;
 
-        if program.comment_attachments.0.is_some() {
-            self.comment_attachment_collector =
-                Some(CommentAttachmentCollector::new(&program.comments));
-        }
-
         // Visit AST to generate scopes tree etc
         self.visit_program(program);
-        if let Some(collector) = self.comment_attachment_collector.take()
+        if self.build_comment_attachments
             && let Some(attachments) = program.comment_attachments.0.as_deref()
+            && attachments.is_empty()
         {
+            let mut collector = CommentAttachmentCollector::new(&program.comments);
+            collector.visit_program(program);
             collector.attach(program, attachments);
         }
 
@@ -452,9 +460,6 @@ impl<'a> SemanticBuilder<'a> {
         // 1. Standalone node-id increment.
         let node_id = self.node_store.alloc_node_id();
         kind.set_node_id(node_id);
-        if let Some(collector) = &mut self.comment_attachment_collector {
-            collector.enter_node(kind);
-        }
         let parent_node_id = self.node_store.current_node_id;
         self.node_store.current_node_id = node_id;
 
@@ -890,9 +895,6 @@ impl<'a> Visit<'a> for SemanticBuilder<'a> {
         if self.check_syntax_error {
             checker::check(kind, self);
         }
-        if let Some(collector) = &mut self.comment_attachment_collector {
-            collector.leave_node();
-        }
         self.pop_ast_node();
     }
 
@@ -916,9 +918,6 @@ impl<'a> Visit<'a> for SemanticBuilder<'a> {
         let node_id = self.node_store.alloc_node_id();
         debug_assert_eq!(node_id, NodeId::ROOT);
         kind.set_node_id(node_id);
-        if let Some(collector) = &mut self.comment_attachment_collector {
-            collector.enter_node(kind);
-        }
         self.node_store.current_node_id = node_id;
         // 2 & 3. Either the full node store or the ancestry stack — never both.
         #[cfg(feature = "cfg")]
