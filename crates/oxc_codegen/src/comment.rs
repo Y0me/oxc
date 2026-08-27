@@ -209,6 +209,15 @@ impl CommentStore {
         self.groups.binary_search_by_key(&anchor, |group| group.anchor).ok()
     }
 
+    #[inline]
+    fn clear_if_empty(&mut self, index: usize) {
+        let group = &self.groups[index];
+        if group.leading.is_empty() && group.trailing.is_empty() {
+            let anchor = group.anchor as usize;
+            self.anchor_presence[anchor >> 6] &= !(1 << (anchor & 63));
+        }
+    }
+
     fn has_non_semantic_at(&self, anchor: u32) -> bool {
         self.index(anchor).is_some_and(|index| {
             let group = &self.groups[index];
@@ -239,6 +248,7 @@ impl CommentStore {
         }
         let comments = std::mem::take(&mut self.groups[index].leading);
         self.remaining -= comments.len();
+        self.clear_if_empty(index);
         Some(comments)
     }
 
@@ -249,6 +259,7 @@ impl CommentStore {
         }
         let comments = std::mem::take(&mut self.groups[index].trailing);
         self.remaining -= comments.len();
+        self.clear_if_empty(index);
         Some(comments)
     }
 
@@ -263,6 +274,7 @@ impl CommentStore {
         comments.extend(take_matching(&mut group.trailing, predicate));
         comments.sort_unstable_by_key(|comment| comment.span.start);
         self.remaining -= comments.len();
+        self.clear_if_empty(index);
         comments
     }
 
@@ -274,6 +286,7 @@ impl CommentStore {
         let Some(index) = self.index(anchor) else { return CommentList::new() };
         let comments = take_matching(&mut self.groups[index].leading, predicate);
         self.remaining -= comments.len();
+        self.clear_if_empty(index);
         comments
     }
 
@@ -298,6 +311,7 @@ impl CommentStore {
         let Some(index) = self.index(anchor) else { return CommentList::new() };
         let comments = take_matching(&mut self.groups[index].trailing, predicate);
         self.remaining -= comments.len();
+        self.clear_if_empty(index);
         comments
     }
 
@@ -313,6 +327,7 @@ impl CommentStore {
                 comments.retain(|candidate| candidate.span != comment.span);
                 self.remaining -= before - comments.len();
             }
+            self.clear_if_empty(index);
         }
     }
 
@@ -370,6 +385,9 @@ impl CommentStore {
             comments.extend(take_matching(&mut group.leading, predicate));
             comments.extend(take_matching(&mut group.trailing, predicate));
         }
+        for index in first..last {
+            self.clear_if_empty(index);
+        }
         comments.sort_unstable_by_key(|comment| comment.span.start);
         self.remaining -= comments.len();
         comments
@@ -399,6 +417,7 @@ impl CommentStore {
             comments.extend(take_matching(&mut group.trailing, |comment| {
                 preserve_when_orphaned(*comment)
             }));
+            self.clear_if_empty(group_index);
         }
         comments.sort_unstable_by_key(|comment| comment.span.start);
         self.remaining -= comments.len();
