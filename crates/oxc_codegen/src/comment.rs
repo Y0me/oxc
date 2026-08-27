@@ -147,7 +147,12 @@ struct CommentGroup {
 impl CommentStore {
     fn build(comments: &mut Vec<Comment>) -> Self {
         let remaining = comments.len();
-        comments.sort_unstable_by_key(|comment| (comment.attached_to, comment.span.start));
+        if comments.windows(2).any(|comments| {
+            let [left, right] = comments else { unreachable!() };
+            (left.attached_to, left.span.start) > (right.attached_to, right.span.start)
+        }) {
+            comments.sort_unstable_by_key(|comment| (comment.attached_to, comment.span.start));
+        }
         let mut groups = Vec::<CommentGroup>::new();
         let mut anchor_presence = if let Some(last) = comments.last() {
             vec![0; (last.attached_to as usize >> 6) + 1].into_boxed_slice()
