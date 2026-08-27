@@ -346,31 +346,10 @@ impl CommentStore {
         if start >= end {
             return false;
         }
-        let first = start.saturating_add(1) as usize;
-        let end = end as usize;
-        if first >= end {
-            return false;
-        }
-        let first_word = first >> 6;
-        let last_word = (end - 1) >> 6;
-        let Some(&first_bits) = self.anchor_presence.get(first_word) else { return false };
-        if first_word == last_word {
-            let first_mask = u64::MAX << (first & 63);
-            let last_mask = u64::MAX >> (63 - ((end - 1) & 63));
-            return first_bits & first_mask & last_mask != 0;
-        }
-        if first_bits & (u64::MAX << (first & 63)) != 0 {
-            return true;
-        }
-        let middle_end = last_word.min(self.anchor_presence.len());
-        if first_word + 1 < middle_end
-            && self.anchor_presence[first_word + 1..middle_end].iter().any(|&bits| bits != 0)
-        {
-            return true;
-        }
-        self.anchor_presence
-            .get(last_word)
-            .is_some_and(|bits| bits & (u64::MAX >> (63 - ((end - 1) & 63))) != 0)
+        let (first, last) = self.bounds(start.saturating_add(1), end, false);
+        self.groups[first..last]
+            .iter()
+            .any(|group| !group.leading.is_empty() || !group.trailing.is_empty())
     }
 
     fn first_between(
