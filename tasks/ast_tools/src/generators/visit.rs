@@ -240,15 +240,11 @@ fn generate_comment_pruning_macro(schema: &Schema) -> TokenStream {
         let struct_ident = struct_def.ident();
         let visit_fn_ident = visitor_names.visitor_ident();
         let walk_fn_ident = visitor_names.walk_ident();
-        let extra_params = struct_def
-            .visit
-            .visit_args
-            .iter()
-            .map(|(arg_name, arg_type_name)| {
-                let param_ident = create_ident(arg_name);
-                let arg_type_ident = create_ident(arg_type_name);
-                quote!( , #param_ident: #arg_type_ident )
-            });
+        let extra_params = struct_def.visit.visit_args.iter().map(|(arg_name, arg_type_name)| {
+            let param_ident = create_ident(arg_name);
+            let arg_type_ident = create_ident(arg_type_name);
+            quote!( , #param_ident: #arg_type_ident )
+        });
         Some(quote! {
             comment_pruning_visit_method!(
                 #visit_fn_ident,
