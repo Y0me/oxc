@@ -1,3 +1,4 @@
+mod conflate_assignments;
 mod convert_to_dotted_properties;
 mod fold_constants;
 mod inline;
